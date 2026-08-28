@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+
+<html lang="ru">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+    <title>Нативный захват фото</title>
+
+    <style>
+
+        * {
+
+            box-sizing: border-box;
+
+            margin: 0;
+
+            padding: 0;
+
+        }
+
+
+
+        body {
+
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+
+            background-color: #f4f6f9;
+
+            color: #333;
+
+            display: flex;
+
+            flex-direction: column;
+
+            align-items: center;
+
+            padding: 30px 15px;
+
+            min-height: 100vh;
+
+        }
+
+
+
+        .app-container {
+
+            width: 100%;
+
+            max-width: 480px;
+
+            background: #ffffff;
+
+            padding: 20px;
+
+            border-radius: 16px;
+
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+
+            display: flex;
+
+            flex-direction: column;
+
+            gap: 20px;
+
+        }
+
+
+
+        .header {
+
+            text-align: center;
+
+        }
+
+
+
+        h1 {
+
+            font-size: 22px;
+
+            color: #1a1a1a;
+
+            margin-bottom: 6px;
+
+        }
+
+
+
+        .subtitle {
+
+            font-size: 13px;
+
+            color: #666;
+
+        }
+
+
+
+        .preview-zone {
+
+            position: relative;
+
+            width: 100%;
+
+            aspect-ratio: 4 / 3;
+
+            background-color: #f8f9fa;
+
+            border: 2px dashed #cbd5e1;
+
+            border-radius: 12px;
+
+            overflow: hidden;
+
+            display: flex;
+
+            align-items: center;
+
+            justify-content: center;
+
+            transition: border-color 0.2s;
+
+        }
+
+
+
+        .preview-zone.has-image {
+
+            border-style: solid;
+
+            border-color: #e2e8f0;
+
+            background-color: #1e293b;
+
+        }
+
+
+
+        #result-image {
+
+            width: 100%;
+
+            height: 100%;
+
+            object-fit: contain;
+
+            display: none;
+
+        }
+
+
+
+        .placeholder-text {
+
+            color: #64748b;
+
+            font-size: 14px;
+
+            text-align: center;
+
+            padding: 20px;
+
+            line-height: 1.5;
+
+        }
+
+
+
+        .controls {
+
+            display: flex;
+
+            flex-direction: column;
+
+            gap: 10px;
+
+        }
+
+
+
+        .btn-group {
+
+            display: flex;
+
+            gap: 10px;
+
+            width: 100%;
+
+        }
+
+
+
+        button {
+
+            padding: 14px 20px;
+
+            font-size: 15px;
+
+            font-weight: 600;
+
+            border: none;
+
+            border-radius: 10px;
+
+            cursor: pointer;
+
+            transition: background-color 0.2s, transform 0.1s;
+
+            display: inline-flex;
+
+            align-items: center;
+
+            justify-content: center;
+
+            flex: 1;
+
+        }
+
+
+
+        button:active {
+
+            transform: scale(0.98);
+
+        }
+
+
+
+        .btn-primary { background-color: #2563eb; color: #fff; }
+
+        .btn-primary:hover { background-color: #1d4ed8; }
+
+
+
+        .btn-success { background-color: #16a34a; color: #fff; }
+
+        .btn-success:hover { background-color: #15803d; }
+
+
+
+        .btn-danger { background-color: #dc2626; color: #fff; }
+
+        .btn-danger:hover { background-color: #b91c1c; }
+
+
+
+        button:disabled {
+
+            background-color: #e2e8f0;
+
+            color: #94a3b8;
+
+            cursor: not-allowed;
+
+            transform: none;
+
+        }
+
+
+
+        /* Полностью скрытый системный тег */
+
+        #camera-input {
+
+            display: none;
+
+        }
+
+    </style>
+
+</head>
+
+<body>
+
+
+
+    <div class="app-container">
+
+        <div class="header">
+
+            <h1>Создание снимка</h1>
+
+            <p class="subtitle">Использование нативной камеры устройства</p>
+
+        </div>
+
+
+
+        <!-- Зона отображения фотографии -->
+
+        <div class="preview-zone" id="preview-zone">
+
+            <div id="placeholder" class="placeholder-text">
+
+                Нажмите кнопку ниже,<br>чтобы активировать камеру
+
+            </div>
+
+            <img id="result-image" alt="Снимок с камеры">
+
+        </div>
+
+
+
+        <!-- Панель интерактивных кнопок -->
+
+        <div class="controls">
+
+            <button id="open-camera-btn" class="btn-primary">Включить камеру</button>
+
+            
+
+            <div class="btn-group">
+
+                <button id="reset-btn" class="btn-danger" disabled>Переснять</button>
+
+                <button id="download-btn" class="btn-success" disabled>Скачать файл</button>
+
+            </div>
+
+        </div>
+
+    </div>
+
+
+
+    <!-- Системный вызов: capture="environment" задействует ОСНОВНУЮ заднюю камеру смартфона -->
+
+    <input type="file" id="camera-input" accept="image/*" capture="environment">
+
+
+
+    <script>
+
+        const cameraInput = document.getElementById('camera-input');
+
+        const openCameraBtn = document.getElementById('open-camera-btn');
+
+        const resetBtn = document.getElementById('reset-btn');
+
+        const downloadBtn = document.getElementById('download-btn');
+
+        const resultImage = document.getElementById('result-image');
+
+        const placeholder = document.getElementById('placeholder');
+
+        const previewZone = document.getElementById('preview-zone');
+
+
+
+        // Открытие штатной камеры телефона
+
+        openCameraBtn.addEventListener('click', () => {
+
+            cameraInput.click();
+
+        });
+
+
+
+        // Обработка сделанного снимка
+
+        cameraInput.addEventListener('change', (event) => {
+
+            const files = event.target.files;
+
+            
+
+            if (files && files.length > 0) {
+
+                const file = files[0];
+
+                
+
+                // Создаем локальную ссылку на файл в памяти браузера
+
+                const imageURL = URL.createObjectURL(file);
+
+                
+
+                // Обновляем стили контейнера и показываем фото
+
+                previewZone.classList.add('has-image');
+
+                placeholder.style.display = 'none';
+
+                resultImage.src = imageURL;
+
+                resultImage.style.display = 'block';
+
+                
+
+                // Управляем доступностью кнопок
+
+                openCameraBtn.disabled = true;
+
+                resetBtn.disabled = false;
+
+                downloadBtn.disabled = false;
+
+            }
+
+        });
+
+
+
+        // Кнопка очистки / создания нового фото
+
+        resetBtn.addEventListener('click', () => {
+
+            // Освобождаем память от старой ссылки
+
+            if (resultImage.src.startsWith('blob:')) {
+
+                URL.revokeObjectURL(resultImage.src);
+
+            }
+
+            
+
+            // Сбрасываем инпут, чтобы можно было выбрать то же самое фото при желании
+
+            cameraInput.value = ''; 
+
+            
+
+            // Возвращаем исходный вид интерфейса
+
+            previewZone.classList.remove('has-image');
+
+            resultImage.style.display = 'none';
+
+            resultImage.src = '';
+
+            placeholder.style.display = 'block';
+
+            
+
+            openCameraBtn.disabled = false;
+
+            resetBtn.disabled = true;
+
+            downloadBtn.disabled = true;
+
+        });
+
+
+
+        // Скачивание снимка
+
+        downloadBtn.addEventListener('click', () => {
+
+            if (resultImage.src) {
+
+                const link = document.createElement('a');
+
+                link.href = resultImage.src;
+
+                // Формируем имя файла с временной меткой
+
+                link.download = `photo_captured_${Date.now()}.jpg`;
+
+                link.click();
+
+            }
+
+        });
+
+    </script>
+
+</body>
+
+</html>
+
+
+
