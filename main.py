@@ -5,7 +5,7 @@ import uuid
 import base64
 from typing import List
 from pydantic import BaseModel, Field, UUID4
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 
 import torch
@@ -17,6 +17,22 @@ from PIL import Image
 from ultralytics import SAM
 import open_clip
 
+
+import logging
+import time
+from starlette.middleware.base import BaseHTTPMiddleware
+
+torch.set_num_threads(1) # Ограничение потоков на уровне PyTorch
+
+# 1. Настройка формата логов с временной меткой (ISO 8601 / АСУ)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger("app.requests")
+
+
 app = FastAPI(title="MobileSAM & CLIP FAISS Indexing Service")
 
 # --- ИНИЦИАЛИЗАЦИЯ МОДЕЛЕЙ ---
@@ -27,9 +43,10 @@ print(f"Loading MobileSAM model on {device}...")
 sam_model = SAM("mobile_sam.pt")
 
 print(f"Loading CLIP model (ViT-B-32) on {device}...")
-clip_model, _, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion20c_e32')
+clip_model, _, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_e16')
 clip_model = clip_model.to(device)
 clip_model.eval()
+print(f"Loaded CLIP model (ViT-B-32) on {device}...")
 
 # Размерность вектора для ViT-B-32 равна 512
 DIMENSION = 512
@@ -117,23 +134,26 @@ class SearchResponse(BaseModel):
 
 # --- КОНЕЧНЫЕ ТОЧКИ (Endpoints) ---
 
+
 # 1. Получить маски по содержимому изображения
 @app.post("/api/v1/masks/predict", response_model=MaskPredictionResponse)
 async def predict_masks(payload: MaskPredictionRequest):
+    
     image = decode_base64_image(payload.image_base64)
     
     # Запускаем инференс MobileSAM (по умолчанию принимает PIL Image или пути)
     # Передаем параметры conf и iou напрямую в предиктор ultralytics
-    results = sam_model.predict(image, conf=payload.conf_threshold, iou=payload.iou_threshold, verbose=False)
-    
+    results = sam_model.predict(image, conf=payload.conf_threshold, iou=payload.iou_threshold, imgsz=320, verbose=False)
+
     output_masks = []
     if results and results[0].masks is not None:
         # Получаем маски в виде тензора/массива [N, H, W] с типом float/bool
         # Переводим в int (0 и 1) и конвертируем в нативный список Python
         masks_data = results[0].masks.data.cpu().numpy().astype(int)
         output_masks = masks_data.tolist()
+        #output_masks = []
         
-    return MaskPredictionResponse(masks=output_masks)
+    return MaskPredictionResponse(masks=output_masks, total_count=len(masks_data))
 
 
 # 2. Сохранить маски и проиндексировать
@@ -218,7 +238,7 @@ async def search_image(payload: SearchRequest):
     
     # IndexFlatIP возвращает результаты уже отсортированными по убыванию сходства (от лучших к худшим)
     return SearchResponse(results=search_results)
-    
+
 # 4. Отдать содержимое файла index.html
 @app.get("/", response_class=FileResponse)
 async def read_index():
