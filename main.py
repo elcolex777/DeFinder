@@ -1,46 +1,28 @@
 import os
 import io
-import json
 import uuid
+import json
 import base64
-from typing import List
-from pydantic import BaseModel, Field, UUID4
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
-
+import asyncio
+from typing import List, Optional
 import torch
+import open_clip
 import numpy as np
 import faiss
 from PIL import Image
-
-# Импорты ваших моделей
-from ultralytics import SAM
-import open_clip
-
-
-import logging
-import time
-from starlette.middleware.base import BaseHTTPMiddleware
-
-torch.set_num_threads(1) # Ограничение потоков на уровне PyTorch
-
-# 1. Настройка формата логов с временной меткой (ISO 8601 / АСУ)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
-logger = logging.getLogger("app.requests")
-
+from fastapi import FastAPI, HTTPException, status
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field, UUID4
+from ultralytics import SAM, FastSAM
 
 app = FastAPI(title="MobileSAM & CLIP FAISS Indexing Service")
 
 # --- ИНИЦИАЛИЗАЦИЯ МОДЕЛЕЙ ---
-# Рекомендуется использовать 'cuda', если есть GPU, иначе 'cpu'
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 print(f"Loading MobileSAM model on {device}...")
-sam_model = SAM("mobile_sam.pt")
+#sam_model = SAM("mobile_sam.pt")
+sam_model = FastSAM("FastSAM-s.pt")
 
 print(f"Loading CLIP model (ViT-B-32) on {device}...")
 clip_model, _, preprocess = open_clip.create_model_and_transforms('ViT-B-32', pretrained='laion2b_e16')
@@ -48,15 +30,45 @@ clip_model = clip_model.to(device)
 clip_model.eval()
 print(f"Loaded CLIP model (ViT-B-32) on {device}...")
 
-# Размерность вектора для ViT-B-32 равна 512
 DIMENSION = 512
+
+
+# --- PYDANTIC СХЕМЫ ДАННЫХ ---
+class MaskPredictionRequest(BaseModel):
+    image_base64: str = Field(..., description="Изображение в формате Base64")
+    conf_threshold: float = Field(0.25, description="Порог уверенности (conf) для MobileSAM")
+    iou_threshold: float = Field(0.7, description="Порог IoU для NMS в MobileSAM")
+    imgsz: Optional[int] = Field(320, description="Размер изображения для инференса MobileSAM")
+    min_width: float = Field(10.0, description="Минимальная ширина объекта (полигона) в пикселях")
+
+class MaskPredictionResponse(BaseModel):
+    # Исправлено: теперь это список одномерных RLE-массивов
+    masks: List[List[int]] = Field(..., description="Массив масок, сжатых методом RLE")
+
+class IndexMasksRequest(BaseModel):
+    user_id: UUID4 = Field(..., description="GUID пользователя")
+    image_base64: str = Field(..., description="Изображение в формате Base64")
+    # Также обновляем схему здесь, если во второй эндпоинт отправляются те же RLE-маски
+    #masks: List[List[int]] = Field(..., description="Массив RLE-масок из первого эндпоинта")
+    masks: List[List[List[int]]] = Field(..., description="Массив масок из первого эндпоинта")
+
+class SearchRequest(BaseModel):
+    user_id: UUID4 = Field(..., description="GUID пользователя")
+    image_base64: str = Field(..., description="Изображение для поиска в Base64")
+
+class SearchResultItem(BaseModel):
+    image_path: str
+    score: float = Field(..., description="Косинусное сходство (от -1 до 1, чем выше — тем ближе)")
+
+class SearchResponse(BaseModel):
+    results: List[SearchResultItem]
 
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def decode_base64_image(base64_str: str) -> Image.Image:
     try:
         if "," in base64_str:
-            base64_str = base64_str.split(",")[1]
+            base64_str = base64_str.split(",")
         image_data = base64.b64decode(base64_str)
         image = Image.open(io.BytesIO(image_data)).convert("RGB")
         return image
@@ -105,55 +117,80 @@ def extract_clip_embedding(image: Image.Image) -> np.ndarray:
         faiss.normalize_L2(embedding.reshape(1, -1))
         return embedding
 
+def encode_rle2(mask: np.ndarray) -> List[int]:
+    """Сжатие бинарной 2D-маски (0 и 1) в формат RLE (COCO-style)."""
+    pixels = mask.flatten()
+    # Добавляем нули по краям, чтобы корректно зафиксировать изменения на границах массива
+    pixels = np.concatenate([[0], pixels, [0]])
+    runs = np.where(pixels[1:] != pixels[:-1])[0] + 1
+    runs[1::2] -= runs[::2]
+    return runs.tolist()
 
-# --- PYDANTIC СХЕМЫ ДАННЫХ ---
-class MaskPredictionRequest(BaseModel):
-    image_base64: str = Field(..., description="Изображение в формате Base64")
-    conf_threshold: float = Field(0.25, description="Порог уверенности (conf) для MobileSAM")
-    iou_threshold: float = Field(0.7, description="Порог IoU для NMS в MobileSAM")
-
-class MaskPredictionResponse(BaseModel):
-    masks: List[List[List[int]]] = Field(..., description="Массив бинарных масок [N, H, W]")
-
-class IndexMasksRequest(BaseModel):
-    user_id: UUID4 = Field(..., description="GUID пользователя")
-    image_base64: str = Field(..., description="Изображение в формате Base64")
-    masks: List[List[List[int]]] = Field(..., description="Массив масок из первого эндпоинта")
-
-class SearchRequest(BaseModel):
-    user_id: UUID4 = Field(..., description="GUID пользователя")
-    image_base64: str = Field(..., description="Изображение для поиска в Base64")
-
-class SearchResultItem(BaseModel):
-    image_path: str
-    score: float = Field(..., description="Косинусное сходство (от -1 до 1, чем выше — тем ближе)")
-
-class SearchResponse(BaseModel):
-    results: List[SearchResultItem]
+def encode_rle(mask: np.ndarray) -> List[int]:
+    """Быстрое векторизованное сжатие бинарной 2D-маски (0 и 1) в формат RLE."""
+    pixels = mask.flatten()
+    
+    # Находим позиции, где значения пикселей меняются (с 0 на 1 или с 1 на 0)
+    changes = np.diff(pixels)
+    change_indices = np.where(changes != 0)[0] + 1
+    
+    # Формируем длины серий (разности между индексами переключений)
+    if len(change_indices) == 0:
+        runs = [len(pixels)]
+    else:
+        runs = np.diff(np.concatenate(([0], change_indices, [len(pixels)])))
+        runs = runs.tolist()
+    
+    # По стандарту кодирования RLE, массив всегда должен начинаться с подсчета количества нулей.
+    # Если маска сразу начинается с единицы, добавляем технический 0 в начало.
+    if len(pixels) > 0 and pixels[0] == 1:
+        runs.insert(0, 0)
+        
+    return [int(x) for x in runs]
 
 
-# --- КОНЕЧНЫЕ ТОЧКИ (Endpoints) ---
+# --- КОНЕЧНЫЕ ТОЧКИ API ---
 
-
-# 1. Получить маски по содержимому изображения
+# 1. Предсказание масок
 @app.post("/api/v1/masks/predict", response_model=MaskPredictionResponse)
 async def predict_masks(payload: MaskPredictionRequest):
     
     image = decode_base64_image(payload.image_base64)
     
-    # Запускаем инференс MobileSAM (по умолчанию принимает PIL Image или пути)
-    # Передаем параметры conf и iou напрямую в предиктор ultralytics
-    results = sam_model.predict(image, conf=payload.conf_threshold, iou=payload.iou_threshold, imgsz=320, verbose=False)
+    # Выносим блокирующий инференс в отдельный поток через asyncio.to_thread
+    results = await asyncio.to_thread(
+        sam_model.predict, 
+        image, 
+        conf=payload.conf_threshold, 
+        iou=payload.iou_threshold, 
+        imgsz=payload.imgsz,
+        verbose=False
+    )
 
     output_masks = []
-    if results and results[0].masks is not None:
-        # Получаем маски в виде тензора/массива [N, H, W] с типом float/bool
-        # Переводим в int (0 и 1) и конвертируем в нативный список Python
-        masks_data = results[0].masks.data.cpu().numpy().astype(int)
-        output_masks = masks_data.tolist()
-        #output_masks = []
+    
+    # Исправление: results — это список, берем results[0]
+    if results and len(results) > 0 and results[0].masks is not None:
+        # Извлекаем маски [N, H, W] и ограничивающие рамки (boxes) [N, 4]
+        masks_data = results[0].masks.data.cpu().numpy().astype(np.uint8)
         
-    return MaskPredictionResponse(masks=output_masks, total_count=len(masks_data))
+        if results[0].boxes is not None:
+            boxes_data = results[0].boxes.xyxy.cpu().numpy()  # формат [x1, y1, x2, y2]
+            
+            for mask, box in zip(masks_data, boxes_data):
+                x1, y1, x2, y2 = box
+                box_width = x2 - x1  # Вычисляем ширину объекта в пикселях
+                
+                # Фильтруем результаты по минимальной ширине
+                if box_width >= payload.min_width:
+                    # Сжимаем прошедшую фильтр маску методом RLE
+                    rle_mask = encode_rle(mask)
+                    output_masks.append(rle_mask)
+        
+    return MaskPredictionResponse(masks=output_masks)
+
+
+
 
 
 # 2. Сохранить маски и проиндексировать
@@ -167,29 +204,31 @@ async def index_masks(payload: IndexMasksRequest):
     # Сохраняем изображение на диск: data/{id}/images/{guid}.jpg
     img_filename = f"{uuid.uuid4()}.jpg"
     full_image_path = os.path.join(images_dir, img_filename)
-    image.save(full_image_path, format="JPEG")
+    
+    # Выносим тяжелые вычисления и дисковый ввод-вывод из асинхронного event loop
+    await asyncio.to_thread(image.save, full_image_path, format="JPEG")
     
     # Извлекаем и нормализуем эмбеддинг через CLIP ViT-B-32
-    embedding = extract_clip_embedding(image)
+    embedding = await asyncio.to_thread(extract_clip_embedding, image)
     
     # Работа с FAISS
-    index = load_or_create_index(index_path)
+    index = await asyncio.to_thread(load_or_create_index, index_path)
     vector_to_add = np.array([embedding]).astype('float32')
     
     # Порядковый ID вектора в текущем индексе
     current_vector_id = index.ntotal
-    index.add(vector_to_add)
+    await asyncio.to_thread(index.add, vector_to_add)
     
     # Перезаписываем обновленный индекс на диск
-    faiss.write_index(index, index_path)
+    await asyncio.to_thread(faiss.write_index, index, index_path)
     
     # Сохраняем связь ID вектора и метаданных на диск
-    metadata = load_metadata(metadata_path)
+    metadata = await asyncio.to_thread(load_metadata, metadata_path)
     metadata[str(current_vector_id)] = {
         "image_path": full_image_path,
         "masks_count": len(payload.masks)
     }
-    save_metadata(metadata_path, metadata)
+    await asyncio.to_thread(save_metadata, metadata_path, metadata)
     
     return {"status": "ok", "message": "Изображение успешно добавлено в индекс пользователя."}
 
@@ -206,12 +245,12 @@ async def search_image(payload: SearchRequest):
     
     # Извлекаем и нормализуем вектор поискового запроса
     query_image = decode_base64_image(payload.image_base64)
-    query_vector = extract_clip_embedding(query_image)
+    query_vector = await asyncio.to_thread(extract_clip_embedding, query_image)
     query_vector = np.array([query_vector]).astype('float32')
     
     # Читаем индекс и метаданные пользователя с диска
-    index = faiss.read_index(index_path)
-    metadata = load_metadata(metadata_path)
+    index = await asyncio.to_thread(faiss.read_index, index_path)
+    metadata = await asyncio.to_thread(load_metadata, metadata_path)
     
     # Вычисляем сколько объектов запрашивать (максимум 10)
     k = min(10, index.ntotal)
@@ -220,11 +259,11 @@ async def search_image(payload: SearchRequest):
     
     # Поиск в FAISS. Для IndexFlatIP:
     # distances — это значения косинусного сходства (чем БОЛЬШЕ значение, тем ближе картинки)
-    distances, indices = index.search(query_vector, k)
+    distances, indices = await asyncio.to_thread(index.search, query_vector, k)
     
     search_results = []
     # Извлекаем результаты (массивы двумерные, берем строку 0)
-    for dist, idx in zip(distances[0], indices[0]):
+    for dist, idx in zip(distances, indices):
         if idx == -1: 
             continue
         
@@ -236,16 +275,15 @@ async def search_image(payload: SearchRequest):
             )
         )
     
-    # IndexFlatIP возвращает результаты уже отсортированными по убыванию сходства (от лучших к худшим)
+    # IndexFlatIP возвращает результаты уже отсортированными по убыванию сходства (от лучших к худших)
     return SearchResponse(results=search_results)
+
 
 # 4. Отдать содержимое файла index.html
 @app.get("/", response_class=FileResponse)
 async def read_index():
-    # Путь к файлу index.html в корне проекта
     index_file_path = "index.html"
 
-    # Проверяем, существует ли файл, чтобы избежать внутренней ошибки сервера
     if not os.path.exists(index_file_path):
         raise HTTPException(
             status_code=404, 
@@ -255,7 +293,8 @@ async def read_index():
     return FileResponse(index_file_path, media_type="text/html")
 
 
+# --- ЗАПУСК ПРИЛОЖЕНИЯ ---
 if __name__ == "__main__":
     import uvicorn
-    # Запуск сервера на порту 8000
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Запуск сервера на порту 8000 с поддержкой автоматической перезагрузки (reload)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
