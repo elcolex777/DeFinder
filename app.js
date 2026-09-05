@@ -369,7 +369,7 @@ function handleFileSelect(event) {
         previewZone.style.display = "flex";
         captureBtn.textContent = "📷 Сделать новый снимок";
         galleryBtn.textContent = "🖼️ Выбрать другое фото";
-        settingsPanel.style.display = "flex";
+        settingsPanel.style.display = "block";
         resultsPanel.style.display = "flex";
         
         originalImageElement = new Image();
