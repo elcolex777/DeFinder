@@ -1,4 +1,5 @@
 import os
+import os.path
 import io
 import uuid
 import json
@@ -56,6 +57,8 @@ class SearchRequest(BaseModel):
 
 class SearchResultItem(BaseModel):
     image_path: str
+    crop_path: Optional[str] = Field(None, description="Путь к файлу кропа маски")
+    center: Optional[dict] = Field(None, description="Координаты центра маски {x, y}")
     score: float = Field(..., description="Косинусное сходство (от -1 до 1, чем выше — тем ближе)")
 
 class SearchResponse(BaseModel):
@@ -414,7 +417,7 @@ async def search_image(payload: SearchRequest):
     query_vector = np.array([query_vector]).astype('float32')
     
     # Читаем индекс и метаданные пользователя с диска
-    index = await asyncio.to_thread(faiss.read_index, index_path)
+    index = await asyncio.to_thread(load_or_create_index, index_path)
     metadata = await asyncio.to_thread(load_metadata, metadata_path)
     
     # Вычисляем сколько объектов запрашивать (максимум 10)
@@ -422,13 +425,11 @@ async def search_image(payload: SearchRequest):
     if k == 0:
         return SearchResponse(results=[])
     
-    # Поиск в FAISS. Для IndexFlatIP:
-    # distances — это значения косинусного сходства (чем БОЛЬШЕ значение, тем ближе картинки)
+    # Поиск в FAISS
     distances, indices = await asyncio.to_thread(index.search, query_vector, k)
     
     search_results = []
-    # Извлекаем результаты (массивы двумерные, берем строку 0)
-    for dist, idx in zip(distances, indices):
+    for dist, idx in zip(distances[0], indices[0]):
         if idx == -1: 
             continue
         
@@ -436,11 +437,12 @@ async def search_image(payload: SearchRequest):
         search_results.append(
             SearchResultItem(
                 image_path=meta_item.get("image_path", "unknown"),
+                crop_path=meta_item.get("crop_path"),
+                center=meta_item.get("center"),
                 score=float(dist)
             )
         )
     
-    # IndexFlatIP возвращает результаты уже отсортированными по убыванию сходства (от лучших к худших)
     return SearchResponse(results=search_results)
 
 
@@ -457,6 +459,29 @@ async def read_index():
 
     return FileResponse(index_file_path, media_type="text/html")
 
+@app.get("/api/v1/data/{user_id}/images/{file_path:path}")
+async def get_user_image(user_id: UUID4, file_path: str):
+    user_str = str(user_id)
+    _, _, images_dir = get_user_paths(user_str)
+    
+    # Защита от Path Traversal (../)
+    base_dir = os.path.abspath(images_dir)
+    target_path = os.path.abspath(os.path.join(images_dir, file_path))
+    
+    # Проверяем, что запрашиваемый файл находится строго внутри директории images пользователя
+    if not target_path.startswith(base_dir):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="Доступ запрещен."
+        )
+    
+    if not os.path.exists(target_path) or not os.path.isfile(target_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail="Файл не найден."
+        )
+        
+    return FileResponse(target_path, media_type="image/jpeg")
 
 # --- ЗАПУСК ПРИЛОЖЕНИЯ ---
 if __name__ == "__main__":
