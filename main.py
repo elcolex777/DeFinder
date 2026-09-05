@@ -180,9 +180,10 @@ async def predict_masks(payload: MaskPredictionRequest):
             for mask, box in zip(masks_data, boxes_data):
                 x1, y1, x2, y2 = box
                 box_width = x2 - x1  # Вычисляем ширину объекта в пикселях
+                box_h = y2 - y1
                 
                 # Фильтруем результаты по минимальной ширине
-                if box_width >= payload.min_width:
+                if box_width >= payload.min_width or box_h >= payload.min_width:
                     # Сжимаем прошедшую фильтр маску методом RLE
                     rle_mask = encode_rle(mask)
                     output_masks.append(rle_mask)

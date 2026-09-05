@@ -1,7 +1,10 @@
 const BASE_URL = 'http://46.16.36.127:8001';
 
 const cameraInput = document.getElementById("camera-input");
+const galleryInput = document.getElementById("gallery-input");
 const captureBtn = document.getElementById("capture-btn");
+const galleryBtn = document.getElementById("gallery-btn");
+
 const resultCanvas = document.getElementById("result-canvas");
 const previewZone = document.getElementById("preview-zone");
 const settingsPanel = document.getElementById("settings-panel");
@@ -24,26 +27,41 @@ const successMessage = document.getElementById("success-message");
 let originalImageElement = null;
 let lastImgBlobUrl = null;
 
-captureBtn.addEventListener("click", function() {
+// Функция сброса предыдущего состояния
+function resetState() {
     if (lastImgBlobUrl) {
         URL.revokeObjectURL(lastImgBlobUrl);
         lastImgBlobUrl = null;
     }
     cameraInput.value = "";
+    galleryInput.value = "";
     previewZone.style.display = "none";
     settingsPanel.style.display = "none";
     resultsPanel.style.display = "none";
     originalImageElement = null;
+}
+
+// Клик по кнопке «Сделать снимок»
+captureBtn.addEventListener("click", function() {
+    resetState();
     cameraInput.click();
 });
 
-cameraInput.addEventListener("change", function(event) {
+// Клик по кнопке «Выбрать из галереи»
+galleryBtn.addEventListener("click", function() {
+    resetState();
+    galleryInput.click();
+});
+
+// Единая функция обработки выбранного файла
+function handleFileSelect(event) {
     const files = event.target.files;
     if (files && files.length > 0) {
         const firstFile = files[0];
         lastImgBlobUrl = URL.createObjectURL(firstFile);
         previewZone.style.display = "flex";
-        captureBtn.textContent = "Сделать новый снимок";
+        captureBtn.textContent = "📷 Сделать новый снимок";
+        galleryBtn.textContent = "🖼️ Выбрать другое фото";
         settingsPanel.style.display = "flex";
         resultsPanel.style.display = "flex";
         
@@ -57,7 +75,11 @@ cameraInput.addEventListener("change", function(event) {
         };
         originalImageElement.src = lastImgBlobUrl;
     }
-});
+}
+
+// Слушатели для обоих инпутов
+cameraInput.addEventListener("change", handleFileSelect);
+galleryInput.addEventListener("change", handleFileSelect);
 
 confSlider.addEventListener("input", () => confVal.textContent = parseFloat(confSlider.value).toFixed(2));
 iouSlider.addEventListener("input", () => iouVal.textContent = parseFloat(iouSlider.value).toFixed(2));
@@ -110,27 +132,41 @@ function drawMaskBorders(masksArray, inferenceWidth, inferenceHeight) {
             }
         }
         
-        ctx.lineWidth = 3;
         const randomHue = Math.floor(Math.random() * 360);
-        ctx.strokeStyle = `hsl(${randomHue}, 100%, 50%)`;
-        ctx.beginPath();
+        const fillColor = `hsla(${randomHue}, 100%, 50%, 0.35)`;
+        const strokeColor = `hsl(${randomHue}, 100%, 50%)`;
+        
+        const fillPath = new Path2D();
+        const borderPath = new Path2D();
         
         for (let y = 0; y < inferenceHeight; y++) {
             for (let x = 0; x < inferenceWidth; x++) {
                 const currentPos = y * inferenceWidth + x;
+                
                 if (binaryMask[currentPos] === 1) {
-                    let isLeftBorder = (x <= 0) || (binaryMask[currentPos - 1] !== 1);
-                    let isRightBorder = (x >= inferenceWidth - 1) || (binaryMask[currentPos + 1] !== 1);
-                    let isTopBorder = (y <= 0) || (binaryMask[(y - 1) * inferenceWidth + x] !== 1);
-                    let isBottomBorder = (y >= inferenceHeight - 1) || (binaryMask[(y + 1) * inferenceWidth + x] !== 1);
+                    const rectX = x * scaleX;
+                    const rectY = y * scaleY;
+                    
+                    fillPath.rect(rectX, rectY, scaleX, scaleY);
+                    
+                    const isLeftBorder   = (x <= 0) || (binaryMask[currentPos - 1] !== 1);
+                    const isRightBorder  = (x >= inferenceWidth - 1) || (binaryMask[currentPos + 1] !== 1);
+                    const isTopBorder    = (y <= 0) || (binaryMask[(y - 1) * inferenceWidth + x] !== 1);
+                    const isBottomBorder = (y >= inferenceHeight - 1) || (binaryMask[(y + 1) * inferenceWidth + x] !== 1);
                     
                     if (isLeftBorder || isRightBorder || isTopBorder || isBottomBorder) {
-                        ctx.rect(x * scaleX, y * scaleY, scaleX, scaleY);
+                        borderPath.rect(rectX, rectY, scaleX, scaleY);
                     }
                 }
             }
         }
-        ctx.stroke();
+        
+        ctx.fillStyle = fillColor;
+        ctx.fill(fillPath);
+        
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = strokeColor;
+        ctx.stroke(borderPath);
     });
 }
 
