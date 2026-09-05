@@ -1,5 +1,198 @@
 const BASE_URL = 'http://46.16.36.127:8001';
 
+let selectedMaskIndex = null;
+let cachedDecodedMasks = [];
+
+// Элементы панели поиска
+const searchPanel = document.getElementById("search-panel");
+const searchQueryCrop = document.getElementById("search-query-crop");
+const searchStatusBadge = document.getElementById("search-status-badge");
+const searchFullPreview = document.getElementById("search-full-preview");
+const searchFullImg = document.getElementById("search-full-img");
+const searchGrid = document.getElementById("search-grid");
+
+let currentSearchAbortController = null;
+
+
+
+function hideSearchPanel() {
+    if (currentSearchAbortController) {
+        currentSearchAbortController.abort();
+        currentSearchAbortController = null;
+    }
+    searchPanel.style.display = "none";
+    searchGrid.innerHTML = "";
+    searchFullPreview.style.display = "none";
+    searchFullImg.removeAttribute("src");
+}
+
+/**
+ * 1. Получение Bounding Box маски, масштабирование на оригинальное изображение,
+ * 2. Ресайз кропа до 200px по большей стороне (с сохранением пропорций),
+ * 3. Экспорт кропа в Base64.
+ */
+function getScaledMaskCropBase64(binaryMask, infW, infH) {
+    if (!originalImageElement) return null;
+    
+    let minX = infW, maxX = -1, minY = infH, maxY = -1;
+    
+    for (let y = 0; y < infH; y++) {
+        const row = y * infW;
+        for (let x = 0; x < infW; x++) {
+            if (binaryMask[row + x] === 1) {
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+            }
+        }
+    }
+    
+    if (maxX < minX || maxY < minY) return null;
+    
+    const scaleX = originalImageElement.width / infW;
+    const scaleY = originalImageElement.height / infH;
+    
+    // Масштабируем координаты на оригинальное изображение
+    const origCropX = Math.max(0, Math.floor(minX * scaleX));
+    const origCropY = Math.max(0, Math.floor(minY * scaleY));
+    const origCropW = Math.min(originalImageElement.width - origCropX, Math.ceil((maxX - minX + 1) * scaleX));
+    const origCropH = Math.min(originalImageElement.height - origCropY, Math.ceil((maxY - minY + 1) * scaleY));
+    
+    if (origCropW <= 0 || origCropH <= 0) return null;
+    
+    // Ограничение максимальной стороны до 200px
+    let finalW = origCropW;
+    let finalH = origCropH;
+    const maxDimension = Math.max(origCropW, origCropH);
+    
+    if (maxDimension > 200) {
+        const scaleFactor = 200 / maxDimension;
+        finalW = Math.max(1, Math.round(origCropW * scaleFactor));
+        finalH = Math.max(1, Math.round(origCropH * scaleFactor));
+    }
+    
+    const cropCanvas = document.createElement("canvas");
+    cropCanvas.width = finalW;
+    cropCanvas.height = finalH;
+    const cropCtx = cropCanvas.getContext("2d");
+    
+    cropCtx.drawImage(
+        originalImageElement,
+        origCropX, origCropY, origCropW, origCropH,
+        0, 0, finalW, finalH
+    );
+    
+    const dataUrl = cropCanvas.toDataURL("image/jpeg", 0.90);
+    return {
+        base64WithoutPrefix: dataUrl.split(",")[1],
+        fullDataUrl: dataUrl
+    };
+}
+
+/**
+ * 4. Запрос поиска похожих объектов по выбранной маске
+ */
+async function sendSearchRequest(cropBase64Data) {
+    if (currentSearchAbortController) {
+        currentSearchAbortController.abort();
+    }
+    currentSearchAbortController = new AbortController();
+    
+    searchPanel.style.display = "flex";
+    searchQueryCrop.src = cropBase64Data.fullDataUrl;
+    searchStatusBadge.className = "queue-badge badge-processing";
+    searchStatusBadge.textContent = "Отправка...";
+    searchGrid.innerHTML = "";
+    searchFullPreview.style.display = "none";
+    
+    const payload = {
+        user_id: currentUserId,
+        image_base64: cropBase64Data.base64WithoutPrefix
+    };
+    
+    try {
+        const response = await fetch(`${BASE_URL}/api/v1/masks/search`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+            signal: currentSearchAbortController.signal
+        });
+        
+        if (!response.ok) {
+            throw new Error(`Ошибка: ${response.status} ${response.statusText}`);
+        }
+        
+        const data = await response.json();
+        const results = data.results || [];
+        
+        searchStatusBadge.className = "queue-badge badge-success";
+        searchStatusBadge.textContent = `Успешно (${results.length})`;
+        
+        renderSearchResults(results);
+        
+    } catch (error) {
+        if (error.name === 'AbortError') return;
+        searchStatusBadge.className = "queue-badge badge-error";
+        searchStatusBadge.textContent = "Ошибка";
+        console.error("Search failed:", error);
+    }
+}
+
+/**
+ * Рендеринг карточек результатов в две колонки
+ */
+function renderSearchResults(results) {
+    searchGrid.innerHTML = "";
+    
+    if (results.length === 0) {
+        searchGrid.innerHTML = `<div style="grid-column: span 2; font-size: 13px; color: #64748b; text-align: center; padding: 10px;">Ничего не найдено</div>`;
+        return;
+    }
+    
+    results.forEach(item => {
+        const card = document.createElement("div");
+        card.className = "search-card";
+        
+        // Форматирование score в 00.00
+        const formattedScore = formatScore(item.score);
+        
+        // Ссылка на кроп маски: /api/v1/{crop_path}
+        const cropUrl = `${BASE_URL}/api/v1/${item.crop_path.replace(/^\/+/, '')}`;
+        const fullImageUrl = `${BASE_URL}/api/v1/${item.image_path.replace(/^\/+/, '')}`;
+        
+        card.innerHTML = `
+            <img src="${cropUrl}" alt="crop result" loading="lazy">
+            <span class="search-score-badge">${formattedScore}</span>
+        `;
+        
+        // При клике на результат показываем полный image_path под шапкой
+        card.onclick = () => {
+            searchFullImg.src = fullImageUrl;
+            searchFullPreview.style.display = "flex";
+            searchFullPreview.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        };
+        
+        searchGrid.appendChild(card);
+    });
+}
+
+/**
+ * Приведение score к формату 00.00 (например, 0.85 -> 00.85, -0.4 -> -00.40)
+ */
+function formatScore(score) {
+    if (typeof score !== "number" || isNaN(score)) return "00.00";
+    const sign = score < 0 ? "-" : "";
+    const absVal = Math.abs(score);
+    const parts = absVal.toFixed(2).split(".");
+    const integerPart = parts[0].padStart(2, "0");
+    const decimalPart = parts[1];
+    return `${sign}${integerPart}.${decimalPart}`;
+}
+
+
+
+
 /**
  * Получает user_id из URL или генерирует новый UUID v4
  */
@@ -75,6 +268,7 @@ function updateSaveButtonState() {
     saveBtn.disabled = !canSave;
 }
 
+// Сброс панели поиска при сбросе общего состояния
 function resetState() {
     if (lastImgBlobUrl) {
         URL.revokeObjectURL(lastImgBlobUrl);
@@ -84,11 +278,18 @@ function resetState() {
     galleryInput.value = "";
     previewZone.style.display = "none";
     settingsPanel.style.display = "none";
+    settingsPanel.open = false;
     resultsPanel.style.display = "none";
     originalImageElement = null;
     lastPredictedMasks = null;
     lastInferenceW = 0;
     lastInferenceH = 0;
+    
+    selectedMaskIndex = null;
+    cachedDecodedMasks = [];
+    resultCanvas.style.cursor = "default";
+    
+    hideSearchPanel();
     updateSaveButtonState();
 }
 
@@ -103,6 +304,62 @@ galleryBtn.addEventListener("click", function() {
 });
 
 saveBtn.addEventListener("click", enqueueSaveTask);
+
+
+/**
+ * Обработка клика по холсту
+ */
+resultCanvas.addEventListener("click", function(event) {
+    if (!lastPredictedMasks || cachedDecodedMasks.length === 0 || !lastInferenceW || !lastInferenceH) {
+        return;
+    }
+    
+    const rect = resultCanvas.getBoundingClientRect();
+    const clickX = (event.clientX - rect.left) * (resultCanvas.width / rect.width);
+    const clickY = (event.clientY - rect.top) * (resultCanvas.height / rect.height);
+    
+    const scaleX = resultCanvas.width / lastInferenceW;
+    const scaleY = resultCanvas.height / lastInferenceH;
+    
+    const infX = Math.floor(clickX / scaleX);
+    const infY = Math.floor(clickY / scaleY);
+    
+    if (infX < 0 || infX >= lastInferenceW || infY < 0 || infY >= lastInferenceH) {
+        return;
+    }
+    
+    const pixelPos = infY * lastInferenceW + infX;
+    let clickedMaskIndex = -1;
+    
+    for (let i = cachedDecodedMasks.length - 1; i >= 0; i--) {
+        if (cachedDecodedMasks[i].binaryMask[pixelPos] === 1) {
+            clickedMaskIndex = i;
+            break;
+        }
+    }
+    
+    if (clickedMaskIndex !== -1) {
+        if (selectedMaskIndex === clickedMaskIndex) {
+            // Повторный клик — сброс выбора
+            selectedMaskIndex = null;
+            hideSearchPanel();
+        } else {
+            // Выбор маски — запускаем кроп и поиск
+            selectedMaskIndex = clickedMaskIndex;
+            const maskObj = cachedDecodedMasks[selectedMaskIndex];
+            const cropData = getScaledMaskCropBase64(maskObj.binaryMask, lastInferenceW, lastInferenceH);
+            if (cropData) {
+                sendSearchRequest(cropData);
+            }
+        }
+    } else {
+        // Клик в пустое место
+        selectedMaskIndex = null;
+        hideSearchPanel();
+    }
+    
+    drawMaskBorders(lastPredictedMasks, lastInferenceW, lastInferenceH);
+});
 
 function handleFileSelect(event) {
     const files = event.target.files;
@@ -212,11 +469,29 @@ function drawMaskBorders(masksArray, inferenceWidth, inferenceHeight) {
     const scaleX = resultCanvas.width / inferenceWidth;
     const scaleY = resultCanvas.height / inferenceHeight;
     
-    masksArray.forEach(rleMask => {
-        const binaryMask = decodeRLE(rleMask, inferenceWidth, inferenceHeight);
-        const randomHue = Math.floor(Math.random() * 360);
-        const fillColor = `hsla(${randomHue}, 100%, 50%, 0.35)`;
-        const strokeColor = `hsl(${randomHue}, 100%, 50%)`;
+    // Подготовка кэша распакованных масок и постоянных оттенков
+    if (cachedDecodedMasks.length !== masksArray.length) {
+        cachedDecodedMasks = masksArray.map((rleMask, idx) => ({
+            binaryMask: decodeRLE(rleMask, inferenceWidth, inferenceHeight),
+            hue: Math.floor((idx * 137.5) % 360) // Равномерное и детерминированное распределение цветов
+        }));
+    }
+    
+    cachedDecodedMasks.forEach((item, index) => {
+        // Если выбрана конкретная маска, остальные скрываем
+        if (selectedMaskIndex !== null && selectedMaskIndex !== index) {
+            return;
+        }
+        
+        const binaryMask = item.binaryMask;
+        const isSelected = (selectedMaskIndex === index);
+        
+        // Для выбранной маски делаем фон чуть ярче и линию толще
+        const fillAlpha = isSelected ? 0.55 : 0.35;
+        const strokeWidth = isSelected ? 4 : 3;
+        
+        const fillColor = `hsla(${item.hue}, 100%, 50%, ${fillAlpha})`;
+        const strokeColor = `hsl(${item.hue}, 100%, 50%)`;
         
         const fillPath = new Path2D();
         const borderPath = new Path2D();
@@ -245,7 +520,8 @@ function drawMaskBorders(masksArray, inferenceWidth, inferenceHeight) {
         
         ctx.fillStyle = fillColor;
         ctx.fill(fillPath);
-        ctx.lineWidth = 3;
+        
+        ctx.lineWidth = strokeWidth;
         ctx.strokeStyle = strokeColor;
         ctx.stroke(borderPath);
     });
@@ -260,6 +536,9 @@ async function sendMasksRequest() {
     
     isPredicting = true;
     lastPredictedMasks = null;
+    selectedMaskIndex = null;
+    cachedDecodedMasks = [];
+    resultCanvas.style.cursor = "default";
     updateSaveButtonState();
     
     loaderText.textContent = "Обработка масок...";
@@ -302,6 +581,9 @@ async function sendMasksRequest() {
         lastInferenceW = infW;
         lastInferenceH = infH;
         lastPredictedMasks = responseData.masks;
+        cachedDecodedMasks = []; // обнуляем кэш под новые маски
+        selectedMaskIndex = null;
+        resultCanvas.style.cursor = "pointer";
         
         const totalMasksCount = responseData.masks.length;
         successMessage.textContent = `Успешно получено масок: ${totalMasksCount}`;

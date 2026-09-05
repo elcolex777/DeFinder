@@ -252,6 +252,97 @@
         input[type="file"] {
             display: none;
         }
+
+        /* ... остальные стили ... */
+        
+        .search-panel {
+            display: none;
+            flex-direction: column;
+            gap: 15px;
+            background: #f8fafc;
+            padding: 15px;
+            border-radius: 12px;
+            border: 1px solid #e2e8f0;
+        }
+        .search-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+        }
+        .search-header-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .search-thumb-crop {
+            width: 50px;
+            height: auto;
+            max-height: 50px;
+            object-fit: contain;
+            border-radius: 6px;
+            border: 1px solid #cbd5e1;
+            background: #fff;
+        }
+        .search-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: #334155;
+        }
+        .search-full-preview {
+            display: none;
+            width: 100%;
+            max-height: 280px;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid #cbd5e1;
+            background: #0f172a;
+            justify-content: center;
+            align-items: center;
+        }
+        .search-full-preview img {
+            width: 100%;
+            height: 100%;
+            max-height: 280px;
+            object-fit: contain;
+        }
+        .search-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+        }
+        .search-card {
+            position: relative;
+            width: 100%;
+            aspect-ratio: 1 / 1;
+            background: #0f172a;
+            border-radius: 10px;
+            overflow: hidden;
+            border: 2px solid transparent;
+            cursor: pointer;
+            transition: transform .15s ease, border-color .15s ease;
+        }
+        .search-card:hover {
+            transform: translateY(-2px);
+            border-color: #2563eb;
+        }
+        .search-card img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            display: block;
+        }
+        .search-score-badge {
+            position: absolute;
+            bottom: 6px;
+            right: 8px;
+            font-size: 20pt;
+            font-weight: 700;
+            color: #ffffff;
+            text-shadow: 0 2px 4px rgba(0, 0, 0, 0.9), 0 0 8px rgba(0, 0, 0, 0.6);
+            pointer-events: none;
+            line-height: 1;
+        }
     </style>
 </head>
 <body>
@@ -313,6 +404,25 @@
             </div>
             <div class="message message-error" id="error-message"></div>
             <div class="message message-success" id="success-message"></div>
+        </div>
+
+        <!-- Внутри .app-container после <div class="results-panel"> добавьте: -->
+        <div class="search-panel" id="search-panel">
+            <div class="search-header">
+                <div class="search-header-left">
+                    <img id="search-query-crop" class="search-thumb-crop" alt="crop">
+                    <span class="search-title">Поиск похожих</span>
+                </div>
+                <span id="search-status-badge" class="queue-badge badge-processing">Отправка...</span>
+            </div>
+
+            <!-- Блок полноразмерной картинки при клике на результат -->
+            <div class="search-full-preview" id="search-full-preview">
+                <img id="search-full-img" alt="Выбранный объект">
+            </div>
+
+            <!-- Сетка результатов в 2 колонки -->
+            <div class="search-grid" id="search-grid"></div>
         </div>
 
         <!-- Панель очереди задач на сохранение -->
