@@ -4,7 +4,394 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
     <title>DeFinder</title>
-    <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background-color:#f4f6f9;color:#333;display:flex;flex-direction:column;align-items:center;padding:30px 15px;min-height:100vh}.app-container{width:100%;max-width:480px;background:#fff;padding:20px;border-radius:16px;box-shadow:0 8px 24px rgba(0,0,0,.08);display:flex;flex-direction:column;gap:20px}.header{text-align:center}h1{font-size:26px;color:#1a1a1a;margin-bottom:6px;font-weight:700;letter-spacing:-.5px}.subtitle{font-size:14px;color:#666}.preview-zone{display:none;position:relative;width:100%;aspect-ratio:4/3;background-color:#1e293b;border:2px solid #e2e8f0;border-radius:12px;overflow:hidden;align-items:center;justify-content:center}#result-canvas{width:100%;height:100%;object-fit:contain}.controls{display:flex;flex-direction:column;gap:15px}button{padding:14px 20px;font-size:15px;font-weight:600;border:none;border-radius:10px;cursor:pointer;transition:background-color .2s,transform .1s;display:inline-flex;align-items:center;justify-content:center;width:100%}button:active{transform:scale(.98)}.btn-primary{background-color:#2563eb;color:#fff}.btn-primary:hover{background-color:#1d4ed8}.settings-panel,.results-panel{display:none;flex-direction:column;gap:15px;background:#f8fafc;padding:15px;border-radius:12px;border:1px solid #e2e8f0}.range-group{display:flex;flex-direction:column;gap:6px}.range-label{display:flex;justify-content:space-between;font-size:14px;font-weight:600;color:#475569}.range-slider{width:100%;height:8px;border-radius:4px;outline:none;accent-color:#2563eb;cursor:pointer}.loader-container{display:none;align-items:center;justify-content:center;gap:10px;padding:10px}.spinner{width:24px;height:24px;border:3px solid #e2e8f0;border-top:3px solid #2563eb;border-radius:50%;animation:spin .8s linear infinite}@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}.message{padding:12px;border-radius:8px;font-size:14px;font-weight:500;line-height:1.4;display:none}.message-error{background-color:#fef2f2;color:#991b1b;border:1px solid #fca5a5}.message-success{background-color:#f0fdf4;color:#166534;border:1px solid #86efac;text-align:center}#camera-input{display:none}</style>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background-color: #f4f6f9;
+            color: #333;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 30px 15px;
+            min-height: 100vh;
+        }
+        .app-container {
+            width: 100%;
+            max-width: 480px;
+            background: #fff;
+            padding: 20px;
+            border-radius: 16px;
+            box-shadow: 0 8px 24px rgba(0,0,0,.08);
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .header {
+            text-align: center;
+        }
+        h1 {
+            font-size: 26px;
+            color: #1a1a1a;
+            margin-bottom: 6px;
+            font-weight: 700;
+            letter-spacing: -.5px;
+        }
+        .subtitle {
+            font-size: 14px;
+            color: #666;
+        }
+        .preview-zone {
+            display: none;
+            position: relative;
+            width: 100%;
+            aspect-ratio: 4/3;
+            background-color: #1e293b;
+            border: 2px solid #e2e8f0;
+            border-radius: 12px;
+            overflow: hidden;
+            align-items: center;
+            justify-content: center;
+        }
+        #result-canvas {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+        .controls {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        button {
+            padding: 14px 20px;
+            font-size: 15px;
+            font-weight: 600;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: background-color .2s, transform .1s, opacity .2s;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+        }
+        button:active:not(:disabled) {
+            transform: scale(.98);
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .btn-primary {
+            background-color: #2563eb;
+            color: #fff;
+        }
+        .btn-primary:hover:not(:disabled) {
+            background-color: #1d4ed8;
+        }
+        .btn-secondary {
+            background-color: #64748b;
+            color: #fff;
+        }
+        .btn-secondary:hover:not(:disabled) {
+            background-color: #475569;
+        }
+        .btn-success {
+            background-color: #16a34a;
+            color: #fff;
+        }
+        .btn-success:hover:not(:disabled) {
+            background-color: #15803d;
+        }
+        .settings-panel, .results-panel, .queue-panel {
+            display: none;
+            flex-direction: column;
+            gap: 15px;
+            background: #f8fafc;
+            padding: 15px;
+            border-radius: 12px;
+            border: 1px solid #e2e8f0;
+        }
+        .queue-header {
+            font-size: 15px;
+            font-weight: 600;
+            color: #334155;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .queue-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .queue-item {
+            background: #fff;
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+            padding: 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            transition: all .3s ease;
+        }
+        .queue-item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 13px;
+        }
+        .queue-item-title {
+            font-weight: 600;
+            color: #1e293b;
+        }
+        .queue-badge {
+            padding: 3px 8px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .badge-pending {
+            background: #f1f5f9;
+            color: #64748b;
+        }
+        .badge-processing {
+            background: #eff6ff;
+            color: #2563eb;
+        }
+        .badge-success {
+            background: #f0fdf4;
+            color: #16a34a;
+        }
+        .badge-error {
+            background: #fef2f2;
+            color: #dc2626;
+        }
+        .queue-item-msg {
+            font-size: 12px;
+            color: #64748b;
+            line-height: 1.3;
+            word-break: break-word;
+        }
+        .btn-retry {
+            padding: 6px 12px;
+            font-size: 12px;
+            font-weight: 600;
+            background-color: #ef4444;
+            color: #fff;
+            border-radius: 6px;
+            width: auto;
+            align-self: flex-start;
+        }
+        .btn-retry:hover {
+            background-color: #dc2626;
+        }
+        .range-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .range-label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 14px;
+            font-weight: 600;
+            color: #475569;
+        }
+        .range-slider {
+            width: 100%;
+            height: 8px;
+            border-radius: 4px;
+            outline: none;
+            accent-color: #2563eb;
+            cursor: pointer;
+        }
+        .loader-container {
+            display: none;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            padding: 10px;
+        }
+        .spinner {
+            width: 24px;
+            height: 24px;
+            border: 3px solid #e2e8f0;
+            border-top: 3px solid #2563eb;
+            border-radius: 50%;
+            animation: spin .8s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .message {
+            padding: 12px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            line-height: 1.4;
+            display: none;
+        }
+        .message-error {
+            background-color: #fef2f2;
+            color: #991b1b;
+            border: 1px solid #fca5a5;
+        }
+        .message-success {
+            background-color: #f0fdf4;
+            color: #166534;
+            border: 1px solid #86efac;
+            text-align: center;
+        }
+        input[type="file"] {
+            display: none;
+        }
+
+        /* ... остальные стили ... */
+        
+        .search-panel {
+            display: none;
+            flex-direction: column;
+            gap: 15px;
+            background: #f8fafc;
+            padding: 15px;
+            border-radius: 12px;
+            border: 1px solid #e2e8f0;
+        }
+        .search-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+        }
+        .search-header-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .search-thumb-crop {
+            width: 50px;
+            height: auto;
+            max-height: 50px;
+            object-fit: contain;
+            border-radius: 6px;
+            border: 1px solid #cbd5e1;
+            background: #fff;
+        }
+        .search-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: #334155;
+        }
+        .search-full-preview {
+            display: none;
+            width: 100%;
+            max-height: 280px;
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid #cbd5e1;
+            background: #0f172a;
+            justify-content: center;
+            align-items: center;
+        }
+        .search-full-preview img {
+            width: 100%;
+            height: 100%;
+            max-height: 280px;
+            object-fit: contain;
+        }
+        .search-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+        }
+        .search-card {
+            position: relative;
+            width: 100%;
+            aspect-ratio: 1 / 1;
+            background: #0f172a;
+            border-radius: 10px;
+            overflow: hidden;
+            border: 2px solid transparent;
+            cursor: pointer;
+            transition: transform .15s ease, border-color .15s ease;
+        }
+        .search-card:hover {
+            transform: translateY(-2px);
+            border-color: #2563eb;
+        }
+        .search-card img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            display: block;
+        }
+        .search-score-badge {
+            position: absolute;
+            bottom: 6px;
+            right: 8px;
+            font-size: 20pt;
+            font-weight: 700;
+            color: #ffffff;
+            text-shadow: 0 2px 4px rgba(0, 0, 0, 0.9), 0 0 8px rgba(0, 0, 0, 0.6);
+            pointer-events: none;
+            line-height: 1;
+        }
+
+        details.settings-panel {
+            display: none;
+            background: #f8fafc;
+            border-radius: 12px;
+            border: 1px solid #e2e8f0;
+            padding: 12px 15px;
+            transition: all 0.2s ease;
+        }
+
+        details.settings-panel summary {
+            font-size: 15px;
+            font-weight: 600;
+            color: #334155;
+            cursor: pointer;
+            list-style: none;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            user-select: none;
+        }
+
+        details.settings-panel summary::-webkit-details-marker {
+            display: none;
+        }
+
+        /* Иконка шестерёнки и стрелочки */
+        details.settings-panel summary::before {
+            content: "⚙️ Настройки";
+        }
+
+        details.settings-panel summary::after {
+            content: "▼";
+            font-size: 11px;
+            color: #64748b;
+            transition: transform 0.2s ease;
+        }
+
+        details.settings-panel[open] summary::after {
+            transform: rotate(180deg);
+        }
+
+        .settings-content {
+            margin-top: 15px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+    </style>
 </head>
 <body>
 
@@ -19,57 +406,89 @@
         </div>
 
         <div class="controls">
-            <button id="capture-btn" class="btn-primary">Сделать снимок</button>
+            <button id="capture-btn" class="btn-primary">📷 Сделать снимок</button>
+            <button id="gallery-btn" class="btn-secondary">🖼️ Выбрать из галереи</button>
+            <button id="save-btn" class="btn-success" disabled>💾 Сохранить</button>
         </div>
 
-        <div class="settings-panel" id="settings-panel">
-            <div class="range-group">
-                <div class="range-label">
-                    <span>Порог уверенности (conf)</span>
-                    <span id="conf-val">0.25</span>
+        <details class="settings-panel" id="settings-panel">
+            <summary></summary>
+            <div class="settings-content">
+                <div class="range-group">
+                    <div class="range-label">
+                        <span>Порог уверенности (conf)</span>
+                        <span id="conf-val">0.25</span>
+                    </div>
+                    <input type="range" id="conf-slider" class="range-slider" min="0.0" max="1.0" step="0.01" value="0.25">
                 </div>
-                <input type="range" id="conf-slider" class="range-slider" min="0.0" max="1.0" step="0.01" value="0.25">
-            </div>
 
-            <div class="range-group">
-                <div class="range-label">
-                    <span>Порог IoU для NMS</span>
-                    <span id="iou-val">0.70</span>
+                <div class="range-group">
+                    <div class="range-label">
+                        <span>Порог IoU для NMS</span>
+                        <span id="iou-val">0.70</span>
+                    </div>
+                    <input type="range" id="iou-slider" class="range-slider" min="0.0" max="1.0" step="0.01" value="0.70">
                 </div>
-                <input type="range" id="iou-slider" class="range-slider" min="0.0" max="1.0" step="0.01" value="0.70">
-            </div>
 
-            <div class="range-group">
-                <div class="range-label">
-                    <span>Размер изображения (imgsz)</span>
-                    <span id="imgsz-val">640</span>
+                <div class="range-group">
+                    <div class="range-label">
+                        <span>Размер изображения (imgsz)</span>
+                        <span id="imgsz-val">800</span>
+                    </div>
+                    <input type="range" id="imgsz-slider" class="range-slider" min="0" max="1024" step="80" value="800">
                 </div>
-                <input type="range" id="imgsz-slider" class="range-slider" min="0" max="1024" step="80" value="640">
-            </div>
 
-            <div class="range-group">
-                <div class="range-label">
-                    <span>Мин. ширина объекта (min_width)</span>
-                    <span id="minwidth-val">10</span>
+                <div class="range-group">
+                    <div class="range-label">
+                        <span>Мин. ширина объекта (min_width)</span>
+                        <span id="minwidth-val">10</span>
+                    </div>
+                    <input type="range" id="minwidth-slider" class="range-slider" min="0" max="1000" step="10" value="10">
                 </div>
-                <input type="range" id="minwidth-slider" class="range-slider" min="0" max="1000" step="10" value="10">
             </div>
-        </div>
+        </details>
 
         <div class="results-panel" id="results-panel">
             <div class="loader-container" id="loader">
                 <div class="spinner"></div>
-                <span style="font-size:14px;color:#64748b;">Обработка масок...</span>
+                <span id="loader-text" style="font-size:14px;color:#64748b;">Обработка масок...</span>
             </div>
             <div class="message message-error" id="error-message"></div>
             <div class="message message-success" id="success-message"></div>
         </div>
+
+        <!-- Внутри .app-container после <div class="results-panel"> добавьте: -->
+        <div class="search-panel" id="search-panel">
+            <div class="search-header">
+                <div class="search-header-left">
+                    <img id="search-query-crop" class="search-thumb-crop" alt="crop">
+                    <span class="search-title">Поиск похожих</span>
+                </div>
+                <span id="search-status-badge" class="queue-badge badge-processing">Отправка...</span>
+            </div>
+
+            <!-- Блок полноразмерной картинки при клике на результат -->
+            <div class="search-full-preview" id="search-full-preview">
+                <img id="search-full-img" alt="Выбранный объект">
+            </div>
+
+            <!-- Сетка результатов в 2 колонки -->
+            <div class="search-grid" id="search-grid"></div>
+        </div>
+
+        <!-- Панель очереди задач на сохранение -->
+        <div class="queue-panel" id="queue-panel">
+            <div class="queue-header">
+                <span>Очередь сохранения</span>
+                <span id="queue-counter" style="font-size:13px;color:#64748b;">0 задач</span>
+            </div>
+            <div class="queue-list" id="queue-list"></div>
+        </div>
     </div>
 
     <input type="file" id="camera-input" accept="image/*" capture="environment">
+    <input type="file" id="gallery-input" accept="image/*">
 
-    <!-- Подключение внешнего JS файла -->
     <script src="app.js"></script>
-
 </body>
 </html>

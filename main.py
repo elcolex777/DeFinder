@@ -1,4 +1,5 @@
 import os
+import os.path
 import io
 import uuid
 import json
@@ -48,9 +49,7 @@ class MaskPredictionResponse(BaseModel):
 class IndexMasksRequest(BaseModel):
     user_id: UUID4 = Field(..., description="GUID пользователя")
     image_base64: str = Field(..., description="Изображение в формате Base64")
-    # Также обновляем схему здесь, если во второй эндпоинт отправляются те же RLE-маски
-    #masks: List[List[int]] = Field(..., description="Массив RLE-масок из первого эндпоинта")
-    masks: List[List[List[int]]] = Field(..., description="Массив масок из первого эндпоинта")
+    masks: List[List[int]] = Field(..., description="Массив RLE-масок из predict_masks")
 
 class SearchRequest(BaseModel):
     user_id: UUID4 = Field(..., description="GUID пользователя")
@@ -58,6 +57,8 @@ class SearchRequest(BaseModel):
 
 class SearchResultItem(BaseModel):
     image_path: str
+    crop_path: Optional[str] = Field(None, description="Путь к файлу кропа маски")
+    center: Optional[dict] = Field(None, description="Координаты центра маски {x, y}")
     score: float = Field(..., description="Косинусное сходство (от -1 до 1, чем выше — тем ближе)")
 
 class SearchResponse(BaseModel):
@@ -180,9 +181,10 @@ async def predict_masks(payload: MaskPredictionRequest):
             for mask, box in zip(masks_data, boxes_data):
                 x1, y1, x2, y2 = box
                 box_width = x2 - x1  # Вычисляем ширину объекта в пикселях
+                box_h = y2 - y1
                 
                 # Фильтруем результаты по минимальной ширине
-                if box_width >= payload.min_width:
+                if box_width >= payload.min_width or box_h >= payload.min_width:
                     # Сжимаем прошедшую фильтр маску методом RLE
                     rle_mask = encode_rle(mask)
                     output_masks.append(rle_mask)
@@ -190,47 +192,213 @@ async def predict_masks(payload: MaskPredictionRequest):
     return MaskPredictionResponse(masks=output_masks)
 
 
+def decode_rle_and_get_crop_info(rle_runs: List[int], width: int, height: int):
+    """
+    Разжимает RLE-маску (формат чередования: [0s, 1s, 0s, 1s...]) 
+    и возвращает (crop_bbox, center_point) либо None, если маска пуста.
+    """
+    total_pixels = width * height
+    if not rle_runs:
+        return None
+
+    # Восстанавливаем плоский одномерный массив пикселей
+    flat_mask = np.zeros(total_pixels, dtype=np.uint8)
+    curr_idx = 0
+    val = 0  # Всегда начинаем с 0 в соответствии с encode_rle
+    
+    for length in rle_runs:
+        if length > 0:
+            if val == 1:
+                flat_mask[curr_idx : curr_idx + length] = 1
+            curr_idx += length
+        val = 1 - val  # Чередуем значение (0 -> 1 -> 0)
+
+    # Приводим к исходной размерности изображения (H, W)
+    mask_2d = flat_mask[:total_pixels].reshape((height, width))
+    
+    # Находим координаты всех активных пикселей маски
+    y_indices, x_indices = np.where(mask_2d == 1)
+    
+    if len(x_indices) == 0 or len(y_indices) == 0:
+        return None
+
+    # Границы для crop [x1, y1, x2, y2]
+    # Прибавляем 1 к максимальным координатам, так как PIL.crop(box) ожидает полуоткрытый интервал [x1, x2)
+    x1 = int(np.min(x_indices))
+    y1 = int(np.min(y_indices))
+    x2 = min(width, int(np.max(x_indices)) + 1)
+    y2 = min(height, int(np.max(y_indices)) + 1)
+
+    # Центр масс пикселей маски
+    center_x = round(float(np.mean(x_indices)), 2)
+    center_y = round(float(np.mean(y_indices)), 2)
+
+    bbox = (x1, y1, x2, y2)
+    center = {"x": center_x, "y": center_y}
+
+    return bbox, center
+
+def extract_clip_embeddings(images: List[Image.Image]) -> np.ndarray:
+    """Извлекает нормализованные эмбеддинги для списка изображений с помощью CLIP."""
+    if not images:
+        return np.empty((0, DIMENSION), dtype='float32')
+    
+    with torch.no_grad():
+        img_tensors = torch.stack([preprocess(img) for img in images]).to(device)
+        image_features = clip_model.encode_image(img_tensors)
+        embeddings = image_features.cpu().numpy().astype('float32')
+        faiss.normalize_L2(embeddings)
+        return embeddings
+
+def get_bbox_and_center(coords: list, img_width: int, img_height: int) -> Optional[tuple]:
+    """
+    Вычисляет [x1, y1, x2, y2] для crop и координаты центральной точки (center_x, center_y).
+    """
+    pts = np.array(coords, dtype=float)
+    if pts.size == 0:
+        return None
+
+    # Вариант 1: передан массив точек полигона [[x1, y1], [x2, y2], ...]
+    if pts.ndim == 2 and pts.shape[1] == 2:
+        x1 = float(pts[:, 0].min())
+        y1 = float(pts[:, 1].min())
+        x2 = float(pts[:, 0].max())
+        y2 = float(pts[:, 1].max())
+        center_x = float(pts[:, 0].mean())
+        center_y = float(pts[:, 1].mean())
+
+    # Вариант 2: передан bbox формата [[x1, y1, x2, y2]]
+    elif pts.ndim == 2 and pts.shape[1] == 4 and pts.shape[0] == 1:
+        x1, y1, x2, y2 = [float(v) for v in pts[0]]
+        center_x = (x1 + x2) / 2.0
+        center_y = (y1 + y2) / 2.0
+
+    # Вариант 3: передан плоский bbox формата [x1, y1, x2, y2]
+    elif pts.ndim == 1 and len(pts) == 4:
+        x1, y1, x2, y2 = [float(v) for v in pts]
+        center_x = (x1 + x2) / 2.0
+        center_y = (y1 + y2) / 2.0
+    else:
+        return None
+
+    # Ограничиваем координаты границами кадра для crop
+    crop_x1 = max(0, int(x1))
+    crop_y1 = max(0, int(y1))
+    crop_x2 = min(img_width, int(x2))
+    crop_y2 = min(img_height, int(y2))
+
+    if crop_x2 > crop_x1 and crop_y2 > crop_y1:
+        bbox = (crop_x1, crop_y1, crop_x2, crop_y2)
+        # Округляем координаты центра для компактности
+        center = (round(center_x, 2), round(center_y, 2))
+        return bbox, center
+
+    return None
 
 
+def extract_clip_embeddings(images: List[Image.Image]) -> np.ndarray:
+    """Извлекает нормализованные эмбеддинги для батча изображений с помощью CLIP."""
+    if not images:
+        return np.empty((0, DIMENSION), dtype='float32')
+    
+    with torch.no_grad():
+        img_tensors = torch.stack([preprocess(img) for img in images]).to(device)
+        image_features = clip_model.encode_image(img_tensors)
+        embeddings = image_features.cpu().numpy().astype('float32')
+        faiss.normalize_L2(embeddings)
+        return embeddings
 
-# 2. Сохранить маски и проиндексировать
+
+def extract_clip_embedding(image: Image.Image) -> np.ndarray:
+    """Извлекает эмбеддинг одного изображения (для обратной совместимости в поиске)."""
+    return extract_clip_embeddings([image])[0]
+
+def save_crop_image(img: Image.Image, path: str):
+    img.save(path, format="JPEG", quality=95)
+
+
+def save_image_to_disk(img: Image.Image, file_path: str):
+    """Сохраняет изображение, гарантируя предварительное создание всех промежуточных директорий."""
+    dir_name = os.path.dirname(file_path)
+    if not os.path.exists(dir_name):
+        os.makedirs(dir_name, exist_ok=True)
+    img.save(file_path, format="JPEG", quality=95)
+
+
 @app.post("/api/v1/masks/index")
 async def index_masks(payload: IndexMasksRequest):
     user_str = str(payload.user_id)
     image = decode_base64_image(payload.image_base64)
+    img_w, img_h = image.size
     
     index_path, metadata_path, images_dir = get_user_paths(user_str)
     
-    # Сохраняем изображение на диск: data/{id}/images/{guid}.jpg
-    img_filename = f"{uuid.uuid4()}.jpg"
+    # 1. Генерируем идентификатор и пути
+    img_id = str(uuid.uuid4())
+    img_filename = f"{img_id}.jpg"
     full_image_path = os.path.join(images_dir, img_filename)
     
-    # Выносим тяжелые вычисления и дисковый ввод-вывод из асинхронного event loop
-    await asyncio.to_thread(image.save, full_image_path, format="JPEG")
+    # Подпапка с названием файла исходной картинки (без расширения)
+    crops_dir = os.path.join(images_dir, img_id)
     
-    # Извлекаем и нормализуем эмбеддинг через CLIP ViT-B-32
-    embedding = await asyncio.to_thread(extract_clip_embedding, image)
+    # Создаем подпапку для кропов, если ее еще нет
+    await asyncio.to_thread(os.makedirs, crops_dir, exist_ok=True)
     
-    # Работа с FAISS
+    # Сохраняем исходное полное изображение
+    await asyncio.to_thread(save_image_to_disk, image, full_image_path)
+    
+    # 2. Разжимаем RLE-маски, вырезаем кропы и получаем центры
+    crop_images: List[Image.Image] = []
+    centers: List[dict] = []
+
+    for rle_mask in payload.masks:
+        res = decode_rle_and_get_crop_info(rle_mask, img_w, img_h)
+        if res is not None:
+            bbox, center = res
+            crop_images.append(image.crop(bbox))
+            centers.append(center)
+
+    # Если переданные маски пустые или отсутствуют — кропом выступает всё изображение
+    if not crop_images:
+        crop_images = [image]
+        centers = [{"x": round(img_w / 2.0, 2), "y": round(img_h / 2.0, 2)}]
+
+    # 3. Сохраняем каждый кроп на диск в созданную подпапку
+    crop_paths: List[str] = []
+    for i, crop_img in enumerate(crop_images):
+        crop_filename = f"crop_{i}.jpg"
+        crop_full_path = os.path.join(crops_dir, crop_filename)
+        await asyncio.to_thread(save_image_to_disk, crop_img, crop_full_path)
+        crop_paths.append(crop_full_path)
+    
+    # 4. Извлекаем нормализованные эмбеддинги CLIP батчем
+    embeddings = await asyncio.to_thread(extract_clip_embeddings, crop_images)
+    
+    # 5. Добавляем векторы в FAISS
     index = await asyncio.to_thread(load_or_create_index, index_path)
-    vector_to_add = np.array([embedding]).astype('float32')
-    
-    # Порядковый ID вектора в текущем индексе
     current_vector_id = index.ntotal
-    await asyncio.to_thread(index.add, vector_to_add)
     
-    # Перезаписываем обновленный индекс на диск
+    vectors_to_add = embeddings.astype('float32')
+    await asyncio.to_thread(index.add, vectors_to_add)
     await asyncio.to_thread(faiss.write_index, index, index_path)
     
-    # Сохраняем связь ID вектора и метаданных на диск
+    # 6. Сохраняем метаданные: пути к общей картинке, к кропу и координаты центра
     metadata = await asyncio.to_thread(load_metadata, metadata_path)
-    metadata[str(current_vector_id)] = {
-        "image_path": full_image_path,
-        "masks_count": len(payload.masks)
-    }
+    for i in range(len(crop_images)):
+        vec_id = current_vector_id + i
+        metadata[str(vec_id)] = {
+            "image_path": full_image_path,     # Исходный полный файл
+            "crop_path": crop_paths[i],        # Путь к кропу в созданной подпапке
+            "mask_index": i,
+            "center": centers[i],              # {"x": ..., "y": ...}
+            "masks_count": len(crop_images)
+        }
     await asyncio.to_thread(save_metadata, metadata_path, metadata)
     
-    return {"status": "ok", "message": "Изображение успешно добавлено в индекс пользователя."}
+    return {
+        "status": "ok", 
+        "message": f"Успешно добавлено объектов в индекс: {len(crop_images)}."
+    }
 
 
 # 3. Поиск по фото
@@ -249,7 +417,7 @@ async def search_image(payload: SearchRequest):
     query_vector = np.array([query_vector]).astype('float32')
     
     # Читаем индекс и метаданные пользователя с диска
-    index = await asyncio.to_thread(faiss.read_index, index_path)
+    index = await asyncio.to_thread(load_or_create_index, index_path)
     metadata = await asyncio.to_thread(load_metadata, metadata_path)
     
     # Вычисляем сколько объектов запрашивать (максимум 10)
@@ -257,13 +425,11 @@ async def search_image(payload: SearchRequest):
     if k == 0:
         return SearchResponse(results=[])
     
-    # Поиск в FAISS. Для IndexFlatIP:
-    # distances — это значения косинусного сходства (чем БОЛЬШЕ значение, тем ближе картинки)
+    # Поиск в FAISS
     distances, indices = await asyncio.to_thread(index.search, query_vector, k)
     
     search_results = []
-    # Извлекаем результаты (массивы двумерные, берем строку 0)
-    for dist, idx in zip(distances, indices):
+    for dist, idx in zip(distances[0], indices[0]):
         if idx == -1: 
             continue
         
@@ -271,11 +437,12 @@ async def search_image(payload: SearchRequest):
         search_results.append(
             SearchResultItem(
                 image_path=meta_item.get("image_path", "unknown"),
+                crop_path=meta_item.get("crop_path"),
+                center=meta_item.get("center"),
                 score=float(dist)
             )
         )
     
-    # IndexFlatIP возвращает результаты уже отсортированными по убыванию сходства (от лучших к худших)
     return SearchResponse(results=search_results)
 
 
@@ -292,6 +459,29 @@ async def read_index():
 
     return FileResponse(index_file_path, media_type="text/html")
 
+@app.get("/api/v1/data/{user_id}/images/{file_path:path}")
+async def get_user_image(user_id: UUID4, file_path: str):
+    user_str = str(user_id)
+    _, _, images_dir = get_user_paths(user_str)
+    
+    # Защита от Path Traversal (../)
+    base_dir = os.path.abspath(images_dir)
+    target_path = os.path.abspath(os.path.join(images_dir, file_path))
+    
+    # Проверяем, что запрашиваемый файл находится строго внутри директории images пользователя
+    if not target_path.startswith(base_dir):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="Доступ запрещен."
+        )
+    
+    if not os.path.exists(target_path) or not os.path.isfile(target_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail="Файл не найден."
+        )
+        
+    return FileResponse(target_path, media_type="image/jpeg")
 
 # --- ЗАПУСК ПРИЛОЖЕНИЯ ---
 if __name__ == "__main__":
