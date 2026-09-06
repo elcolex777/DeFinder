@@ -276,9 +276,11 @@ const currentUserId = getOrCreateUserId();
 
 const cameraInput = document.getElementById("camera-input");
 const galleryInput = document.getElementById("gallery-input");
+const batchInput = document.getElementById("batch-input");
 const captureBtn = document.getElementById("capture-btn");
 const galleryBtn = document.getElementById("gallery-btn");
 const saveBtn = document.getElementById("save-btn");
+const uploadBtn = document.getElementById("upload-btn");
 
 const resultCanvas = document.getElementById("result-canvas");
 const previewZone = document.getElementById("preview-zone");
@@ -356,6 +358,13 @@ galleryBtn.addEventListener("click", function() {
     resetState();
     galleryInput.click();
 });
+
+uploadBtn.addEventListener("click", function() {
+    batchInput.value = "";
+    batchInput.click();
+});
+
+batchInput.addEventListener("change", handleBatchUpload);
 
 saveBtn.addEventListener("click", enqueueSaveTask);
 
@@ -446,8 +455,12 @@ minwidthSlider.addEventListener("change", () => { if (originalImageElement) send
 
 function processAndGetBase64(maxImgSize) {
     if (!originalImageElement) return null;
-    let targetWidth = originalImageElement.width;
-    let targetHeight = originalImageElement.height;
+    return getBase64FromImage(originalImageElement, maxImgSize);
+}
+
+function getBase64FromImage(imgElement, maxImgSize) {
+    let targetWidth = imgElement.width;
+    let targetHeight = imgElement.height;
     
     if (maxImgSize > 0 && targetWidth > maxImgSize) {
         const scaleFactor = maxImgSize / targetWidth;
@@ -459,7 +472,7 @@ function processAndGetBase64(maxImgSize) {
     virtualCanvas.width = targetWidth;
     virtualCanvas.height = targetHeight;
     const virtualCtx = virtualCanvas.getContext("2d");
-    virtualCtx.drawImage(originalImageElement, 0, 0, targetWidth, targetHeight);
+    virtualCtx.drawImage(imgElement, 0, 0, targetWidth, targetHeight);
     
     const dataUrl = virtualCanvas.toDataURL("image/jpeg", 0.90);
     return dataUrl.split(",")[1];
@@ -651,6 +664,114 @@ async function sendMasksRequest() {
     }
 }
 
+// -------------------------------------------------------------
+// ПАКЕТНАЯ ОБРАБОТКА И СОХРАНЕНИЕ
+// -------------------------------------------------------------
+
+function readFileAsImage(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const img = new Image();
+            img.onload = () => resolve(img);
+            img.onerror = () => reject(new Error(`Ошибка чтения изображения: ${file.name}`));
+            img.src = e.target.result;
+        };
+        reader.onerror = () => reject(new Error(`Ошибка чтения файла: ${file.name}`));
+        reader.readAsDataURL(file);
+    });
+}
+
+async function handleBatchUpload(event) {
+    const files = Array.from(event.target.files || []);
+    if (files.length === 0) return;
+
+    uploadBtn.disabled = true;
+
+    for (const file of files) {
+        const task = {
+            id: taskIdSequence++,
+            createdAt: new Date(),
+            status: "processing",
+            message: `Извлечение масок для "${file.name}"...`,
+            masksCount: 0,
+            payload: null
+        };
+        saveQueue.push(task);
+        renderQueueUI();
+
+        try {
+            const img = await readFileAsImage(file);
+            const currentImgsz = parseInt(imgszSlider.value, 10);
+            const optimizedBase64 = getBase64FromImage(img, currentImgsz);
+            const originalBase64 = getBase64FromImage(img, 0);
+
+            const requestPayload = {
+                image_base64: optimizedBase64,
+                conf_threshold: parseFloat(confSlider.value),
+                iou_threshold: parseFloat(iouSlider.value),
+                imgsz: currentImgsz,
+                min_width: parseFloat(minwidthSlider.value)
+            };
+
+            const response = await fetch(`${BASE_URL}/api/v1/masks/predict`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(requestPayload)
+            });
+
+            if (!response.ok) {
+                throw new Error(`Ошибка предсказания масок: ${response.status} ${response.statusText}`);
+            }
+
+            const responseData = await response.json();
+            const masks = responseData.masks || [];
+
+            if (masks.length === 0) {
+                task.status = "error";
+                task.message = `Для файла "${file.name}" не найдено масок`;
+                renderQueueUI();
+                continue;
+            }
+
+            let infW = img.width;
+            let infH = img.height;
+            if (currentImgsz > 0 && infW > currentImgsz) {
+                const ratio = currentImgsz / infW;
+                infW = currentImgsz;
+                infH = Math.round(infH * ratio);
+            }
+
+            const scaledMasks = masks.map(mask =>
+                scaleAndEncodeRleMask(mask, infW, infH, img.width, img.height)
+            );
+
+            task.masksCount = scaledMasks.length;
+            task.payload = {
+                user_id: currentUserId,
+                image_base64: originalBase64,
+                masks: scaledMasks
+            };
+            task.status = "pending";
+            task.message = `Маски получены (${scaledMasks.length} шт.). В очереди на сохранение...`;
+            renderQueueUI();
+
+            processQueueWorker();
+
+        } catch (err) {
+            task.status = "error";
+            task.message = err.message || `Ошибка обработки файла ${file.name}`;
+            renderQueueUI();
+        }
+    }
+
+    uploadBtn.disabled = false;
+}
+
+// -------------------------------------------------------------
+// ОЧЕРЕДЬ СОХРАНЕНИЯ
+// -------------------------------------------------------------
+
 function renderQueueUI() {
     if (saveQueue.length === 0) {
         queuePanel.style.display = "none";
@@ -679,15 +800,17 @@ function renderQueueUI() {
             statusText = "Ошибка";
         }
         
+        const countText = task.masksCount > 0 ? ` (${task.masksCount} масок)` : '';
+        
         item.innerHTML = `
             <div class="queue-item-header">
-                <span class="queue-item-title">Задача #${task.id} (${task.masksCount} масок)</span>
+                <span class="queue-item-title">Задача #${task.id}${countText}</span>
                 <span class="queue-badge ${badgeClass}">${statusText}</span>
             </div>
             ${task.message ? `<div class="queue-item-msg">${task.message}</div>` : ''}
         `;
         
-        if (task.status === "error") {
+        if (task.status === "error" && task.payload) {
             const retryBtn = document.createElement("button");
             retryBtn.className = "btn-retry";
             retryBtn.textContent = "🔄 Повторить";
@@ -743,7 +866,7 @@ function enqueueSaveTask() {
 
 function retrySaveTask(taskId) {
     const task = saveQueue.find(t => t.id === taskId);
-    if (task && task.status === "error") {
+    if (task && task.status === "error" && task.payload) {
         task.status = "pending";
         task.message = "Ожидание повторной отправки...";
         renderQueueUI();
@@ -754,7 +877,7 @@ function retrySaveTask(taskId) {
 async function processQueueWorker() {
     if (isQueueWorkerRunning) return;
     
-    const nextTask = saveQueue.find(task => task.status === "pending");
+    const nextTask = saveQueue.find(task => task.status === "pending" && task.payload !== null);
     if (!nextTask) return;
     
     isQueueWorkerRunning = true;
