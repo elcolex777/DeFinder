@@ -13,8 +13,6 @@ const searchGrid = document.getElementById("search-grid");
 
 let currentSearchAbortController = null;
 
-
-
 function hideSearchPanel() {
     if (currentSearchAbortController) {
         currentSearchAbortController.abort();
@@ -24,6 +22,8 @@ function hideSearchPanel() {
     searchGrid.innerHTML = "";
     searchFullPreview.style.display = "none";
     searchFullImg.removeAttribute("src");
+    const oldMarker = searchFullPreview.querySelector(".search-center-marker");
+    if (oldMarker) oldMarker.remove();
 }
 
 /**
@@ -53,7 +53,6 @@ function getScaledMaskCropBase64(binaryMask, infW, infH) {
     const scaleX = originalImageElement.width / infW;
     const scaleY = originalImageElement.height / infH;
     
-    // Масштабируем координаты на оригинальное изображение
     const origCropX = Math.max(0, Math.floor(minX * scaleX));
     const origCropY = Math.max(0, Math.floor(minY * scaleY));
     const origCropW = Math.min(originalImageElement.width - origCropX, Math.ceil((maxX - minX + 1) * scaleX));
@@ -61,7 +60,6 @@ function getScaledMaskCropBase64(binaryMask, infW, infH) {
     
     if (origCropW <= 0 || origCropH <= 0) return null;
     
-    // Ограничение максимальной стороны до 200px
     let finalW = origCropW;
     let finalH = origCropH;
     const maxDimension = Math.max(origCropW, origCropH);
@@ -91,7 +89,20 @@ function getScaledMaskCropBase64(binaryMask, infW, infH) {
 }
 
 /**
- * 4. Запрос поиска похожих объектов по выбранной маске
+ * Получение оригинального изображения для поиска по всей картинке
+ */
+function getOriginalImageCropData() {
+    if (!originalImageElement) return null;
+    const base64WithoutPrefix = processAndGetBase64(0);
+    if (!base64WithoutPrefix) return null;
+    return {
+        base64WithoutPrefix: base64WithoutPrefix,
+        fullDataUrl: `data:image/jpeg;base64,${base64WithoutPrefix}`
+    };
+}
+
+/**
+ * Запрос поиска похожих объектов
  */
 async function sendSearchRequest(cropBase64Data) {
     if (currentSearchAbortController) {
@@ -140,6 +151,63 @@ async function sendSearchRequest(cropBase64Data) {
 }
 
 /**
+ * Генерация стабильного псевдослучайного цвета на основе строки image_path
+ */
+function getColorForImagePath(path) {
+    if (!path) return "#22c55e";
+    let hash = 0;
+    for (let i = 0; i < path.length; i++) {
+        hash = (hash << 5) - hash + path.charCodeAt(i);
+        hash |= 0;
+    }
+    const hue = Math.abs(hash) % 360;
+    return `hsl(${hue}, 75%, 50%)`;
+}
+
+/**
+ * Отображение полного превью с маркером центра
+ */
+function showFullPreview(fullImageUrl, center) {
+    searchFullImg.src = fullImageUrl;
+    searchFullPreview.style.display = "flex";
+
+    const oldMarker = searchFullPreview.querySelector(".search-center-marker");
+    if (oldMarker) oldMarker.remove();
+
+    searchFullImg.onload = () => {
+        if (!center || typeof center.x !== "number" || typeof center.y !== "number") {
+            return;
+        }
+
+        const naturalW = searchFullImg.naturalWidth;
+        const naturalH = searchFullImg.naturalHeight;
+        const containerW = searchFullPreview.clientWidth;
+        const containerH = searchFullPreview.clientHeight;
+
+        if (!naturalW || !naturalH) return;
+
+        const scale = Math.min(containerW / naturalW, containerH / naturalH);
+        const renderedW = naturalW * scale;
+        const renderedH = naturalH * scale;
+
+        const offsetX = (containerW - renderedW) / 2;
+        const offsetY = (containerH - renderedH) / 2;
+
+        const markerX = offsetX + center.x * scale;
+        const markerY = offsetY + center.y * scale;
+
+        const marker = document.createElement("div");
+        marker.className = "search-center-marker";
+        marker.style.left = `${markerX}px`;
+        marker.style.top = `${markerY}px`;
+
+        searchFullPreview.appendChild(marker);
+    };
+
+    searchFullPreview.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+/**
  * Рендеринг карточек результатов в две колонки
  */
 function renderSearchResults(results) {
@@ -154,23 +222,18 @@ function renderSearchResults(results) {
         const card = document.createElement("div");
         card.className = "search-card";
         
-        // Форматирование score в 00.00
         const formattedScore = formatScore(item.score);
-        
-        // Ссылка на кроп маски: /api/v1/{crop_path}
         const cropUrl = `${BASE_URL}/api/v1/${item.crop_path.replace(/^\/+/, '')}`;
         const fullImageUrl = `${BASE_URL}/api/v1/${item.image_path.replace(/^\/+/, '')}`;
+        const borderColor = getColorForImagePath(item.image_path);
         
         card.innerHTML = `
-            <img src="${cropUrl}" alt="crop result" loading="lazy">
+            <img src="${cropUrl}" alt="crop result" loading="lazy" style="border-bottom: 5px solid ${borderColor};">
             <span class="search-score-badge">${formattedScore}</span>
         `;
         
-        // При клике на результат показываем полный image_path под шапкой
         card.onclick = () => {
-            searchFullImg.src = fullImageUrl;
-            searchFullPreview.style.display = "flex";
-            searchFullPreview.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            showFullPreview(fullImageUrl, item.center);
         };
         
         searchGrid.appendChild(card);
@@ -178,20 +241,13 @@ function renderSearchResults(results) {
 }
 
 /**
- * Приведение score к формату 00.00 (например, 0.85 -> 00.85, -0.4 -> -00.40)
+ * Приведение score к формату целых процентов (например, 0.85 -> 85%)
  */
 function formatScore(score) {
-    if (typeof score !== "number" || isNaN(score)) return "00.00";
-    const sign = score < 0 ? "-" : "";
-    const absVal = Math.abs(score);
-    const parts = absVal.toFixed(2).split(".");
-    const integerPart = parts[0].padStart(2, "0");
-    const decimalPart = parts[1];
-    return `${sign}${integerPart}.${decimalPart}`;
+    if (typeof score !== "number" || isNaN(score)) return "0%";
+    const percent = Math.round(score * 100);
+    return `${percent}%`;
 }
-
-
-
 
 /**
  * Получает user_id из URL или генерирует новый UUID v4
@@ -256,7 +312,6 @@ let lastInferenceW = 0;
 let lastInferenceH = 0;
 let isPredicting = false;
 
-// Очередь задач в памяти
 const saveQueue = [];
 let isQueueWorkerRunning = false;
 let taskIdSequence = 1;
@@ -268,7 +323,6 @@ function updateSaveButtonState() {
     saveBtn.disabled = !canSave;
 }
 
-// Сброс панели поиска при сбросе общего состояния
 function resetState() {
     if (lastImgBlobUrl) {
         URL.revokeObjectURL(lastImgBlobUrl);
@@ -305,10 +359,6 @@ galleryBtn.addEventListener("click", function() {
 
 saveBtn.addEventListener("click", enqueueSaveTask);
 
-
-/**
- * Обработка клика по холсту
- */
 resultCanvas.addEventListener("click", function(event) {
     if (!lastPredictedMasks || cachedDecodedMasks.length === 0 || !lastInferenceW || !lastInferenceH) {
         return;
@@ -340,11 +390,9 @@ resultCanvas.addEventListener("click", function(event) {
     
     if (clickedMaskIndex !== -1) {
         if (selectedMaskIndex === clickedMaskIndex) {
-            // Повторный клик — сброс выбора
             selectedMaskIndex = null;
             hideSearchPanel();
         } else {
-            // Выбор маски — запускаем кроп и поиск
             selectedMaskIndex = clickedMaskIndex;
             const maskObj = cachedDecodedMasks[selectedMaskIndex];
             const cropData = getScaledMaskCropBase64(maskObj.binaryMask, lastInferenceW, lastInferenceH);
@@ -353,7 +401,6 @@ resultCanvas.addEventListener("click", function(event) {
             }
         }
     } else {
-        // Клик в пустое место
         selectedMaskIndex = null;
         hideSearchPanel();
     }
@@ -469,16 +516,14 @@ function drawMaskBorders(masksArray, inferenceWidth, inferenceHeight) {
     const scaleX = resultCanvas.width / inferenceWidth;
     const scaleY = resultCanvas.height / inferenceHeight;
     
-    // Подготовка кэша распакованных масок и постоянных оттенков
     if (cachedDecodedMasks.length !== masksArray.length) {
         cachedDecodedMasks = masksArray.map((rleMask, idx) => ({
             binaryMask: decodeRLE(rleMask, inferenceWidth, inferenceHeight),
-            hue: Math.floor((idx * 137.5) % 360) // Равномерное и детерминированное распределение цветов
+            hue: Math.floor((idx * 137.5) % 360)
         }));
     }
     
     cachedDecodedMasks.forEach((item, index) => {
-        // Если выбрана конкретная маска, остальные скрываем
         if (selectedMaskIndex !== null && selectedMaskIndex !== index) {
             return;
         }
@@ -486,7 +531,6 @@ function drawMaskBorders(masksArray, inferenceWidth, inferenceHeight) {
         const binaryMask = item.binaryMask;
         const isSelected = (selectedMaskIndex === index);
         
-        // Для выбранной маски делаем фон чуть ярче и линию толще
         const fillAlpha = isSelected ? 0.55 : 0.35;
         const strokeWidth = isSelected ? 4 : 3;
         
@@ -581,7 +625,7 @@ async function sendMasksRequest() {
         lastInferenceW = infW;
         lastInferenceH = infH;
         lastPredictedMasks = responseData.masks;
-        cachedDecodedMasks = []; // обнуляем кэш под новые маски
+        cachedDecodedMasks = [];
         selectedMaskIndex = null;
         resultCanvas.style.cursor = "pointer";
         
@@ -590,6 +634,12 @@ async function sendMasksRequest() {
         successMessage.style.display = "block";
         
         drawMaskBorders(responseData.masks, lastInferenceW, lastInferenceH);
+        
+        // Автоматический запуск поиска по исходному изображению
+        const fullImageData = getOriginalImageCropData();
+        if (fullImageData) {
+            sendSearchRequest(fullImageData);
+        }
         
     } catch (error) {
         errorMessage.textContent = `Не удалось получить маски: ${error.message}`;
@@ -600,10 +650,6 @@ async function sendMasksRequest() {
         updateSaveButtonState();
     }
 }
-
-// -------------------------------------------------------------
-// РАБОТА С ОЧЕРЕДЬЮ СОХРАНЕНИЯ В ПАМЯТИ
-// -------------------------------------------------------------
 
 function renderQueueUI() {
     if (saveQueue.length === 0) {
@@ -663,9 +709,6 @@ function getNoun(number, one, two, five) {
     return five;
 }
 
-/**
- * Добавление новой задачи в очередь
- */
 function enqueueSaveTask() {
     if (!originalImageElement || !lastPredictedMasks || lastPredictedMasks.length === 0) return;
     
@@ -675,7 +718,6 @@ function enqueueSaveTask() {
     const origW = originalImageElement.width;
     const origH = originalImageElement.height;
     
-    // Снапшот смасштабированных масок для изолированной отправки
     const scaledMasks = lastPredictedMasks.map(mask => 
         scaleAndEncodeRleMask(mask, lastInferenceW, lastInferenceH, origW, origH)
     );
@@ -683,7 +725,7 @@ function enqueueSaveTask() {
     const task = {
         id: taskIdSequence++,
         createdAt: new Date(),
-        status: "pending", // pending | processing | success | error
+        status: "pending",
         message: "",
         masksCount: scaledMasks.length,
         payload: {
@@ -699,9 +741,6 @@ function enqueueSaveTask() {
     processQueueWorker();
 }
 
-/**
- * Повторная попытка для задачи со статусом "error"
- */
 function retrySaveTask(taskId) {
     const task = saveQueue.find(t => t.id === taskId);
     if (task && task.status === "error") {
@@ -712,13 +751,9 @@ function retrySaveTask(taskId) {
     }
 }
 
-/**
- * Последовательный воркер обработки очереди
- */
 async function processQueueWorker() {
     if (isQueueWorkerRunning) return;
     
-    // Ищем первую задачу, готовую к обработке
     const nextTask = saveQueue.find(task => task.status === "pending");
     if (!nextTask) return;
     
@@ -743,7 +778,6 @@ async function processQueueWorker() {
         nextTask.message = responseData.message || "Индексация успешно завершена.";
         renderQueueUI();
         
-        // Исчезает через 5 секунд после успешного сохранения
         setTimeout(() => {
             const index = saveQueue.findIndex(t => t.id === nextTask.id);
             if (index !== -1) {
@@ -758,7 +792,6 @@ async function processQueueWorker() {
         renderQueueUI();
     } finally {
         isQueueWorkerRunning = false;
-        // Запуск следующей задачи в очереди
         processQueueWorker();
     }
 }
