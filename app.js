@@ -627,16 +627,10 @@ async function sendMasksRequest() {
             throw new Error("Ответ сервера не содержит массив 'masks'");
         }
         
-        let infW = originalImageElement.width;
-        let infH = originalImageElement.height;
-        if (currentImgsz > 0 && infW > currentImgsz) {
-            const ratio = currentImgsz / infW;
-            infW = currentImgsz;
-            infH = Math.round(infH * ratio);
-        }
+        // Берём точные размеры маски, возвращённые бэкендом
+        lastInferenceW = responseData.mask_width || originalImageElement.width;
+        lastInferenceH = responseData.mask_height || originalImageElement.height;
         
-        lastInferenceW = infW;
-        lastInferenceH = infH;
         lastPredictedMasks = responseData.masks;
         cachedDecodedMasks = [];
         selectedMaskIndex = null;
@@ -734,13 +728,9 @@ async function handleBatchUpload(event) {
                 continue;
             }
 
-            let infW = img.width;
-            let infH = img.height;
-            if (currentImgsz > 0 && infW > currentImgsz) {
-                const ratio = currentImgsz / infW;
-                infW = currentImgsz;
-                infH = Math.round(infH * ratio);
-            }
+            // Точные размеры маски от сервера
+            const infW = responseData.mask_width || img.width;
+            const infH = responseData.mask_height || img.height;
 
             const scaledMasks = masks.map(mask =>
                 scaleAndEncodeRleMask(mask, infW, infH, img.width, img.height)
