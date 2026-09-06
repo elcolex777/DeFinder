@@ -12,7 +12,7 @@ import numpy as np
 import faiss
 from PIL import Image
 from fastapi import FastAPI, HTTPException, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field, UUID4
 from ultralytics import SAM, FastSAM
 
@@ -43,8 +43,9 @@ class MaskPredictionRequest(BaseModel):
     min_width: float = Field(10.0, description="Минимальная ширина объекта (полигона) в пикселях")
 
 class MaskPredictionResponse(BaseModel):
-    # Исправлено: теперь это список одномерных RLE-массивов
-    masks: List[List[int]] = Field(..., description="Массив масок, сжатых методом RLE")
+    masks: List[List[int]]
+    mask_width: int
+    mask_height: int
 
 class IndexMasksRequest(BaseModel):
     user_id: UUID4 = Field(..., description="GUID пользователя")
@@ -155,41 +156,46 @@ def encode_rle(mask: np.ndarray) -> List[int]:
 # 1. Предсказание масок
 @app.post("/api/v1/masks/predict", response_model=MaskPredictionResponse)
 async def predict_masks(payload: MaskPredictionRequest):
-    
     image = decode_base64_image(payload.image_base64)
     
-    # Выносим блокирующий инференс в отдельный поток через asyncio.to_thread
+    # retina_masks=True интерполирует маски точно в размер входного изображения `image`
     results = await asyncio.to_thread(
         sam_model.predict, 
         image, 
         conf=payload.conf_threshold, 
         iou=payload.iou_threshold, 
         imgsz=payload.imgsz,
+        retina_masks=True,
         verbose=False
     )
 
     output_masks = []
+    mask_h, mask_w = 0, 0
     
-    # Исправление: results — это список, берем results[0]
     if results and len(results) > 0 and results[0].masks is not None:
-        # Извлекаем маски [N, H, W] и ограничивающие рамки (boxes) [N, 4]
         masks_data = results[0].masks.data.cpu().numpy().astype(np.uint8)
         
+        # Получаем реальные размеры сгенерированных 2D-масок
+        if len(masks_data) > 0:
+            mask_h, mask_w = masks_data.shape[1], masks_data.shape[2]
+        
         if results[0].boxes is not None:
-            boxes_data = results[0].boxes.xyxy.cpu().numpy()  # формат [x1, y1, x2, y2]
+            boxes_data = results[0].boxes.xyxy.cpu().numpy()
             
             for mask, box in zip(masks_data, boxes_data):
                 x1, y1, x2, y2 = box
-                box_width = x2 - x1  # Вычисляем ширину объекта в пикселях
+                box_width = x2 - x1
                 box_h = y2 - y1
                 
-                # Фильтруем результаты по минимальной ширине
                 if box_width >= payload.min_width or box_h >= payload.min_width:
-                    # Сжимаем прошедшую фильтр маску методом RLE
                     rle_mask = encode_rle(mask)
                     output_masks.append(rle_mask)
         
-    return MaskPredictionResponse(masks=output_masks)
+    return MaskPredictionResponse(
+        masks=output_masks,
+        mask_width=mask_w,
+        mask_height=mask_h
+    )
 
 
 def decode_rle_and_get_crop_info(rle_runs: List[int], width: int, height: int):
@@ -459,16 +465,39 @@ async def read_index():
 
     return FileResponse(index_file_path, media_type="text/html")
 
+def compress_image_jpeg(file_path: str, target_size_bytes: int) -> bytes:
+    """
+    Уменьшает качество JPEG-изображения без изменения оригинальных размеров (W x H),
+    пока размер файла в байтах не станет меньше target_size_bytes.
+    """
+    with Image.open(file_path) as img:
+        img_rgb = img.convert("RGB")
+        
+        # Перебираем качество с шагом вниз
+        for quality in [85, 75, 65, 50, 35, 20]:
+            buffer = io.BytesIO()
+            img_rgb.save(buffer, format="JPEG", quality=quality, optimize=True)
+            data = buffer.getvalue()
+            if len(data) <= target_size_bytes:
+                return data
+                
+        # Если даже на низком качестве размер чуть выше лимита, возвращаем последний результат
+        return data
+
 @app.get("/api/v1/data/{user_id}/images/{file_path:path}")
-async def get_user_image(user_id: UUID4, file_path: str):
+async def get_user_image(
+    user_id: UUID4, 
+    file_path: str, 
+    optimize_image: bool = True,
+    optimize_image_size: int = 80  # Размер порога оптимизации в килобайтах (по умолчанию 80 КБ)
+):
     user_str = str(user_id)
     _, _, images_dir = get_user_paths(user_str)
     
-    # Защита от Path Traversal (../)
+    # Защита от Path Traversal
     base_dir = os.path.abspath(images_dir)
     target_path = os.path.abspath(os.path.join(images_dir, file_path))
     
-    # Проверяем, что запрашиваемый файл находится строго внутри директории images пользователя
     if not target_path.startswith(base_dir):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, 
@@ -480,8 +509,59 @@ async def get_user_image(user_id: UUID4, file_path: str):
             status_code=status.HTTP_404_NOT_FOUND, 
             detail="Файл не найден."
         )
+    
+    file_size = os.path.getsize(target_path)
+    target_limit_bytes = optimize_image_size * 1024
+    
+    # Если оптимизация включена и размер файла превышает заданный лимит
+    if optimize_image and file_size > target_limit_bytes:
+        compressed_bytes = await asyncio.to_thread(
+            compress_image_jpeg, 
+            target_path, 
+            target_limit_bytes
+        )
+        return Response(content=compressed_bytes, media_type="image/jpeg")
         
+    # В противном случае отдаем файл как есть
     return FileResponse(target_path, media_type="image/jpeg")
+
+
+class IndexedImageItem(BaseModel):
+    image_path: str = Field(..., description="Путь к исходному изображению")
+    masks_count: int = Field(..., description="Количество проиндексированных масок для данного изображения")
+
+class UserImagesInfoResponse(BaseModel):
+    images: List[IndexedImageItem]
+
+
+from collections import Counter
+
+
+@app.get("/api/v1/masks/images/{user_id}", response_model=UserImagesInfoResponse)
+async def get_user_images_info(user_id: UUID4):
+    user_str = str(user_id)
+    _, metadata_path, _ = get_user_paths(user_str)
+    
+    # Если файла метаданных нет, возвращаем пустой список
+    if not os.path.exists(metadata_path):
+        return UserImagesInfoResponse(images=[])
+    
+    # Читаем метаданные асинхронно через поток
+    metadata = await asyncio.to_thread(load_metadata, metadata_path)
+    
+    # Подсчитываем количество масок (записей векторов) для каждого уникального image_path
+    image_counts = Counter()
+    for item in metadata.values():
+        img_path = item.get("image_path")
+        if img_path:
+            image_counts[img_path] += 1
+            
+    images_list = [
+        IndexedImageItem(image_path=img_path, masks_count=count)
+        for img_path, count in image_counts.items()
+    ]
+    
+    return UserImagesInfoResponse(images=images_list)
 
 # --- ЗАПУСК ПРИЛОЖЕНИЯ ---
 if __name__ == "__main__":

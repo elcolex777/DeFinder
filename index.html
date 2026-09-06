@@ -108,6 +108,13 @@
         .btn-success:hover:not(:disabled) {
             background-color: #15803d;
         }
+        .btn-info {
+            background-color: #0284c7;
+            color: #fff;
+        }
+        .btn-info:hover:not(:disabled) {
+            background-color: #0369a1;
+        }
         .settings-panel, .results-panel, .queue-panel {
             display: none;
             flex-direction: column;
@@ -253,8 +260,6 @@
             display: none;
         }
 
-        /* ... остальные стили ... */
-        
         .search-panel {
             display: none;
             flex-direction: column;
@@ -291,6 +296,7 @@
         }
         .search-full-preview {
             display: none;
+            position: relative;
             width: 100%;
             max-height: 280px;
             border-radius: 8px;
@@ -305,6 +311,15 @@
             height: 100%;
             max-height: 280px;
             object-fit: contain;
+        }
+        .search-center-marker {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            box-sizing: border-box;
+            border: 2px solid #22c55e;
+            pointer-events: none;
+            transform: translate(-50%, -50%);
         }
         .search-grid {
             display: grid;
@@ -331,12 +346,13 @@
             height: 100%;
             object-fit: contain;
             display: block;
+            box-sizing: border-box;
         }
         .search-score-badge {
             position: absolute;
             bottom: 6px;
             right: 8px;
-            font-size: 20pt;
+            font-size: 15pt;
             font-weight: 700;
             color: #ffffff;
             text-shadow: 0 2px 4px rgba(0, 0, 0, 0.9), 0 0 8px rgba(0, 0, 0, 0.6);
@@ -369,7 +385,6 @@
             display: none;
         }
 
-        /* Иконка шестерёнки и стрелочки */
         details.settings-panel summary::before {
             content: "⚙️ Настройки";
         }
@@ -405,12 +420,55 @@
             <canvas id="result-canvas"></canvas>
         </div>
 
+        <!-- Верхний блок управляющих кнопок -->
         <div class="controls">
             <button id="capture-btn" class="btn-primary">📷 Сделать снимок</button>
             <button id="gallery-btn" class="btn-secondary">🖼️ Выбрать из галереи</button>
-            <button id="save-btn" class="btn-success" disabled>💾 Сохранить</button>
         </div>
 
+        <!-- Индикаторы статуса поиска/обработки масок -->
+        <div class="results-panel" id="results-panel">
+            <div class="loader-container" id="loader">
+                <div class="spinner"></div>
+                <span id="loader-text" style="font-size:14px;color:#64748b;">Обработка масок...</span>
+            </div>
+            <div class="message message-error" id="error-message"></div>
+            <div class="message message-success" id="success-message"></div>
+        </div>
+
+        <!-- Панель результатов поиска -->
+        <div class="search-panel" id="search-panel">
+            <div class="search-header">
+                <div class="search-header-left">
+                    <img id="search-query-crop" class="search-thumb-crop" alt="crop">
+                    <span class="search-title">Поиск похожих</span>
+                </div>
+                <span id="search-status-badge" class="queue-badge badge-processing">Отправка...</span>
+            </div>
+
+            <div class="search-full-preview" id="search-full-preview">
+                <img id="search-full-img" alt="Выбранный объект">
+            </div>
+
+            <div class="search-grid" id="search-grid"></div>
+        </div>
+
+        <!-- Кнопки Сохранить и Загрузить (за результатами поиска) -->
+        <div class="controls">
+            <button id="save-btn" class="btn-success" disabled>💾 Сохранить</button>
+            <button id="upload-btn" class="btn-info">📁 Загрузить</button>
+        </div>
+
+        <!-- Очередь сохранения -->
+        <div class="queue-panel" id="queue-panel">
+            <div class="queue-header">
+                <span>Очередь сохранения</span>
+                <span id="queue-counter" style="font-size:13px;color:#64748b;">0 задач</span>
+            </div>
+            <div class="queue-list" id="queue-list"></div>
+        </div>
+
+        <!-- Настройки перемещены в самый конец страницы -->
         <details class="settings-panel" id="settings-panel">
             <summary></summary>
             <div class="settings-content">
@@ -447,47 +505,11 @@
                 </div>
             </div>
         </details>
-
-        <div class="results-panel" id="results-panel">
-            <div class="loader-container" id="loader">
-                <div class="spinner"></div>
-                <span id="loader-text" style="font-size:14px;color:#64748b;">Обработка масок...</span>
-            </div>
-            <div class="message message-error" id="error-message"></div>
-            <div class="message message-success" id="success-message"></div>
-        </div>
-
-        <!-- Внутри .app-container после <div class="results-panel"> добавьте: -->
-        <div class="search-panel" id="search-panel">
-            <div class="search-header">
-                <div class="search-header-left">
-                    <img id="search-query-crop" class="search-thumb-crop" alt="crop">
-                    <span class="search-title">Поиск похожих</span>
-                </div>
-                <span id="search-status-badge" class="queue-badge badge-processing">Отправка...</span>
-            </div>
-
-            <!-- Блок полноразмерной картинки при клике на результат -->
-            <div class="search-full-preview" id="search-full-preview">
-                <img id="search-full-img" alt="Выбранный объект">
-            </div>
-
-            <!-- Сетка результатов в 2 колонки -->
-            <div class="search-grid" id="search-grid"></div>
-        </div>
-
-        <!-- Панель очереди задач на сохранение -->
-        <div class="queue-panel" id="queue-panel">
-            <div class="queue-header">
-                <span>Очередь сохранения</span>
-                <span id="queue-counter" style="font-size:13px;color:#64748b;">0 задач</span>
-            </div>
-            <div class="queue-list" id="queue-list"></div>
-        </div>
     </div>
 
     <input type="file" id="camera-input" accept="image/*" capture="environment">
     <input type="file" id="gallery-input" accept="image/*">
+    <input type="file" id="batch-input" accept="image/*" multiple>
 
     <script src="app.js"></script>
 </body>
