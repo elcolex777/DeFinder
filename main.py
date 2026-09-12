@@ -200,49 +200,60 @@ async def predict_masks(payload: MaskPredictionRequest):
 
 def decode_rle_and_get_crop_info(rle_runs: List[int], width: int, height: int):
     """
-    Разжимает RLE-маску (формат чередования: [0s, 1s, 0s, 1s...]) 
-    и возвращает (crop_bbox, center_point) либо None, если маска пуста.
+    Разжимает RLE-маску и возвращает:
+    - bbox: (x1, y1, x2, y2)
+    - center: {"x": ..., "y": ...}
+    - mask_2d: бинарный numpy-массив формы (H, W), где 1 - маска, 0 - фон.
     """
     total_pixels = width * height
     if not rle_runs:
         return None
 
-    # Восстанавливаем плоский одномерный массив пикселей
     flat_mask = np.zeros(total_pixels, dtype=np.uint8)
     curr_idx = 0
-    val = 0  # Всегда начинаем с 0 в соответствии с encode_rle
+    val = 0
     
     for length in rle_runs:
         if length > 0:
             if val == 1:
                 flat_mask[curr_idx : curr_idx + length] = 1
             curr_idx += length
-        val = 1 - val  # Чередуем значение (0 -> 1 -> 0)
+        val = 1 - val
 
-    # Приводим к исходной размерности изображения (H, W)
     mask_2d = flat_mask[:total_pixels].reshape((height, width))
-    
-    # Находим координаты всех активных пикселей маски
     y_indices, x_indices = np.where(mask_2d == 1)
     
     if len(x_indices) == 0 or len(y_indices) == 0:
         return None
 
-    # Границы для crop [x1, y1, x2, y2]
-    # Прибавляем 1 к максимальным координатам, так как PIL.crop(box) ожидает полуоткрытый интервал [x1, x2)
     x1 = int(np.min(x_indices))
     y1 = int(np.min(y_indices))
     x2 = min(width, int(np.max(x_indices)) + 1)
     y2 = min(height, int(np.max(y_indices)) + 1)
 
-    # Центр масс пикселей маски
     center_x = round(float(np.mean(x_indices)), 2)
     center_y = round(float(np.mean(y_indices)), 2)
 
     bbox = (x1, y1, x2, y2)
     center = {"x": center_x, "y": center_y}
 
-    return bbox, center
+    return bbox, center, mask_2d
+
+
+def save_image_to_disk(img: Image.Image, file_path: str):
+    """Сохраняет изображение в JPEG или PNG в зависимости от расширения."""
+    dir_name = os.path.dirname(file_path)
+    if not os.path.exists(dir_name):
+        os.makedirs(dir_name, exist_ok=True)
+    
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext == ".png":
+        img.save(file_path, format="PNG")
+    else:
+        # Для JPEG преобразуем в RGB, если вдруг передан RGBA
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        img.save(file_path, format="JPEG", quality=95)
 
 def extract_clip_embeddings(images: List[Image.Image]) -> np.ndarray:
     """Извлекает нормализованные эмбеддинги для списка изображений с помощью CLIP."""
@@ -323,14 +334,6 @@ def save_crop_image(img: Image.Image, path: str):
     img.save(path, format="JPEG", quality=95)
 
 
-def save_image_to_disk(img: Image.Image, file_path: str):
-    """Сохраняет изображение, гарантируя предварительное создание всех промежуточных директорий."""
-    dir_name = os.path.dirname(file_path)
-    if not os.path.exists(dir_name):
-        os.makedirs(dir_name, exist_ok=True)
-    img.save(file_path, format="JPEG", quality=95)
-
-
 @app.post("/api/v1/masks/index")
 async def index_masks(payload: IndexMasksRequest):
     user_str = str(payload.user_id)
@@ -339,71 +342,122 @@ async def index_masks(payload: IndexMasksRequest):
     
     index_path, metadata_path, images_dir = get_user_paths(user_str)
     
-    # 1. Генерируем идентификатор и пути
+    # 1. Подготовка директорий и путей
     img_id = str(uuid.uuid4())
     img_filename = f"{img_id}.jpg"
     full_image_path = os.path.join(images_dir, img_filename)
-    
-    # Подпапка с названием файла исходной картинки (без расширения)
     crops_dir = os.path.join(images_dir, img_id)
     
-    # Создаем подпапку для кропов, если ее еще нет
     await asyncio.to_thread(os.makedirs, crops_dir, exist_ok=True)
-    
-    # Сохраняем исходное полное изображение
     await asyncio.to_thread(save_image_to_disk, image, full_image_path)
     
-    # 2. Разжимаем RLE-маски, вырезаем кропы и получаем центры
-    crop_images: List[Image.Image] = []
-    centers: List[dict] = []
-
-    for rle_mask in payload.masks:
-        res = decode_rle_and_get_crop_info(rle_mask, img_w, img_h)
-        if res is not None:
-            bbox, center = res
-            crop_images.append(image.crop(bbox))
-            centers.append(center)
-
-    # Если переданные маски пустые или отсутствуют — кропом выступает всё изображение
-    if not crop_images:
-        crop_images = [image]
-        centers = [{"x": round(img_w / 2.0, 2), "y": round(img_h / 2.0, 2)}]
-
-    # 3. Сохраняем каждый кроп на диск в созданную подпапку
+    # Списки для формируемых объектов
+    images_to_save: List[Image.Image] = []
+    clip_inputs: List[Image.Image] = []
     crop_paths: List[str] = []
-    for i, crop_img in enumerate(crop_images):
-        crop_filename = f"crop_{i}.jpg"
-        crop_full_path = os.path.join(crops_dir, crop_filename)
-        await asyncio.to_thread(save_image_to_disk, crop_img, crop_full_path)
-        crop_paths.append(crop_full_path)
-    
-    # 4. Извлекаем нормализованные эмбеддинги CLIP батчем
-    embeddings = await asyncio.to_thread(extract_clip_embeddings, crop_images)
-    
-    # 5. Добавляем векторы в FAISS
+    crop_centers: List[dict] = []
+    crop_types: List[str] = []
+    crop_orig_indices: List[int] = []
+
+    # Преобразуем картинку в RGBA и массив для вырезания прозрачной маски
+    image_rgba = image.convert("RGBA")
+    np_rgba = np.array(image_rgba)
+
+    for mask_idx, rle_mask in enumerate(payload.masks):
+        res = decode_rle_and_get_crop_info(rle_mask, img_w, img_h)
+        if res is None:
+            continue
+            
+        bbox, center, mask_2d = res
+        x1, y1, x2, y2 = bbox
+
+        # --- 1. Стандартный прямоугольный кроп ---
+        crop_standard = image.crop(bbox)
+        images_to_save.append(crop_standard)
+        clip_inputs.append(crop_standard)
+        crop_paths.append(os.path.join(crops_dir, f"crop_{mask_idx}_standard.jpg"))
+        crop_centers.append(center)
+        crop_types.append("standard")
+        crop_orig_indices.append(mask_idx)
+
+        # --- 2. Расширенный кроп (+20px со всех сторон, кроме упирающихся в край) ---
+        pad = 20
+        new_x1 = max(0, x1 - pad) if x1 > 0 else 0
+        new_y1 = max(0, y1 - pad) if y1 > 0 else 0
+        new_x2 = min(img_w, x2 + pad) if x2 < img_w else img_w
+        new_y2 = min(img_h, y2 + pad) if y2 < img_h else img_h
+
+        expanded_bbox = (new_x1, new_y1, new_x2, new_y2)
+        crop_expanded = image.crop(expanded_bbox)
+        images_to_save.append(crop_expanded)
+        clip_inputs.append(crop_expanded)
+        crop_paths.append(os.path.join(crops_dir, f"crop_{mask_idx}_expanded.jpg"))
+        crop_centers.append(center)
+        crop_types.append("expanded")
+        crop_orig_indices.append(mask_idx)
+
+        # --- 3. Кроп маски с прозрачным фоном (RGBA PNG) ---
+        isolated_rgba = np_rgba.copy()
+        # Зануляем альфа-канал вне маски
+        isolated_rgba[mask_2d == 0, 3] = 0
+        
+        # Вырезаем область bbox
+        isolated_crop_np = isolated_rgba[y1:y2, x1:x2]
+        crop_transparent = Image.fromarray(isolated_crop_np, mode="RGBA")
+        
+        # Для подачи в CLIP (ViT ожидает 3-канальное RGB): накладываем на белый фон
+        clip_rgb_transparent = Image.new("RGB", crop_transparent.size, (255, 255, 255))
+        clip_rgb_transparent.paste(crop_transparent, mask=crop_transparent.split()[3])
+
+        images_to_save.append(crop_transparent)
+        clip_inputs.append(clip_rgb_transparent)
+        crop_paths.append(os.path.join(crops_dir, f"crop_{mask_idx}_transparent.png"))
+        crop_centers.append(center)
+        crop_types.append("transparent")
+        crop_orig_indices.append(mask_idx)
+
+    # Fallback, если маски не переданы или пусты
+    if not images_to_save:
+        crop_standard = image
+        images_to_save.append(crop_standard)
+        clip_inputs.append(crop_standard)
+        crop_paths.append(os.path.join(crops_dir, "crop_0_standard.jpg"))
+        crop_centers.append({"x": round(img_w / 2.0, 2), "y": round(img_h / 2.0, 2)})
+        crop_types.append("standard")
+        crop_orig_indices.append(0)
+
+    # 2. Сохраняем все сформированные изображения на диск
+    for img_obj, pth in zip(images_to_save, crop_paths):
+        await asyncio.to_thread(save_image_to_disk, img_obj, pth)
+
+    # 3. Извлекаем нормализованные эмбеддинги CLIP для всех вариантов
+    embeddings = await asyncio.to_thread(extract_clip_embeddings, clip_inputs)
+
+    # 4. Добавляем векторы в FAISS
     index = await asyncio.to_thread(load_or_create_index, index_path)
     current_vector_id = index.ntotal
-    
+
     vectors_to_add = embeddings.astype('float32')
     await asyncio.to_thread(index.add, vectors_to_add)
     await asyncio.to_thread(faiss.write_index, index, index_path)
-    
-    # 6. Сохраняем метаданные: пути к общей картинке, к кропу и координаты центра
+
+    # 5. Сохраняем метаданные
     metadata = await asyncio.to_thread(load_metadata, metadata_path)
-    for i in range(len(crop_images)):
+    for i in range(len(images_to_save)):
         vec_id = current_vector_id + i
         metadata[str(vec_id)] = {
-            "image_path": full_image_path,     # Исходный полный файл
-            "crop_path": crop_paths[i],        # Путь к кропу в созданной подпапке
-            "mask_index": i,
-            "center": centers[i],              # {"x": ..., "y": ...}
-            "masks_count": len(crop_images)
+            "image_path": full_image_path,
+            "crop_path": crop_paths[i],
+            "mask_index": crop_orig_indices[i],
+            "crop_type": crop_types[i],             # standard, expanded, transparent
+            "center": crop_centers[i],
+            "masks_count": len(images_to_save)
         }
     await asyncio.to_thread(save_metadata, metadata_path, metadata)
-    
+
     return {
-        "status": "ok", 
-        "message": f"Успешно добавлено объектов в индекс: {len(crop_images)}."
+        "status": "ok",
+        "message": f"Успешно проиндексировано объектов: {len(images_to_save)} (по 3 варианта на маску)."
     }
 
 
@@ -497,6 +551,9 @@ async def get_user_image(
     # Защита от Path Traversal
     base_dir = os.path.abspath(images_dir)
     target_path = os.path.abspath(os.path.join(images_dir, file_path))
+
+    ext = os.path.splitext(target_path)[1].lower()
+    media_type = "image/png" if ext == ".png" else "image/jpeg"
     
     if not target_path.startswith(base_dir):
         raise HTTPException(
@@ -520,10 +577,10 @@ async def get_user_image(
             target_path, 
             target_limit_bytes
         )
-        return Response(content=compressed_bytes, media_type="image/jpeg")
+        return Response(content=compressed_bytes, media_type=media_type)
         
     # В противном случае отдаем файл как есть
-    return FileResponse(target_path, media_type="image/jpeg")
+    return FileResponse(target_path, media_type=media_type)
 
 
 class IndexedImageItem(BaseModel):

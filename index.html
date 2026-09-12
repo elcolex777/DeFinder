@@ -115,7 +115,7 @@
         .btn-info:hover:not(:disabled) {
             background-color: #0369a1;
         }
-        .settings-panel, .results-panel, .queue-panel {
+        .settings-panel, .results-panel, .queue-panel, .user-images-panel {
             display: none;
             flex-direction: column;
             gap: 15px;
@@ -124,7 +124,7 @@
             border-radius: 12px;
             border: 1px solid #e2e8f0;
         }
-        .queue-header {
+        .queue-header, .user-images-header {
             font-size: 15px;
             font-weight: 600;
             color: #334155;
@@ -282,8 +282,7 @@
         }
         .search-thumb-crop {
             width: 50px;
-            height: auto;
-            max-height: 50px;
+            height: 50px;
             object-fit: contain;
             border-radius: 6px;
             border: 1px solid #cbd5e1;
@@ -358,6 +357,37 @@
             text-shadow: 0 2px 4px rgba(0, 0, 0, 0.9), 0 0 8px rgba(0, 0, 0, 0.6);
             pointer-events: none;
             line-height: 1;
+        }
+
+        /* Горизонтальная лента картинок */
+        .user-images-scroll {
+            display: flex;
+            gap: 10px;
+            overflow-x: auto;
+            padding-bottom: 6px;
+            scroll-behavior: smooth;
+        }
+        .user-images-scroll::-webkit-scrollbar {
+            height: 6px;
+        }
+        .user-images-scroll::-webkit-scrollbar-thumb {
+            background-color: #cbd5e1;
+            border-radius: 3px;
+        }
+        .user-image-thumb {
+            width: 50px;
+            height: 50px;
+            min-width: 50px;
+            min-height: 50px;
+            object-fit: cover;
+            border-radius: 6px;
+            border: 1px solid #cbd5e1;
+            background-color: #e2e8f0;
+            display: block;
+            transition: transform 0.15s ease;
+        }
+        .user-image-thumb:hover {
+            transform: scale(1.05);
         }
 
         details.settings-panel {
@@ -453,7 +483,7 @@
             <div class="search-grid" id="search-grid"></div>
         </div>
 
-        <!-- Кнопки Сохранить и Загрузить (за результатами поиска) -->
+        <!-- Кнопки Сохранить и Загрузить -->
         <div class="controls">
             <button id="save-btn" class="btn-success" disabled>💾 Сохранить</button>
             <button id="upload-btn" class="btn-info">📁 Загрузить</button>
@@ -466,6 +496,14 @@
                 <span id="queue-counter" style="font-size:13px;color:#64748b;">0 задач</span>
             </div>
             <div class="queue-list" id="queue-list"></div>
+        </div>
+
+        <!-- Блок Загруженные изображения -->
+        <div class="user-images-panel" id="user-images-panel">
+            <div class="user-images-header">
+                <span id="user-images-title">Загруженные изображения (0)</span>
+            </div>
+            <div class="user-images-scroll" id="user-images-scroll"></div>
         </div>
 
         <!-- Настройки перемещены в самый конец страницы -->
