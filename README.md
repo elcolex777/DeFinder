@@ -41,6 +41,8 @@ docker logs -n 100 definder_service
 docker container rm definder_service
 docker cp main.py definder_service:/app/main.py
 
+docker update --restart unless-stopped definder_service
+
 ```
 
 ## Конфигурация nginx

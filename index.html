@@ -2,7 +2,11 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+    <!-- Было: -->
+    <!-- <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"> -->
+
+    <!-- Нужно: -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=5.0, user-scalable=yes">
     <title>DeFinder</title>
     <style>
         * {
@@ -311,15 +315,87 @@
             max-height: 280px;
             object-fit: contain;
         }
+
         .search-center-marker {
             position: absolute;
-            width: 20px;
-            height: 20px;
-            box-sizing: border-box;
-            border: 2px solid #22c55e;
-            pointer-events: none;
+            width: 44px;
+            height: 44px;
             transform: translate(-50%, -50%);
+            border: 2px solid #22c55e;
+            border-radius: 6px;
+            background: rgba(34, 197, 94, 0.15);
+            box-sizing: border-box;
+            pointer-events: none; /* чтобы клик свободно проходил на картинку под ним */
+            overflow: hidden;
+            animation: markerPulse 1.8s ease-in-out infinite;
         }
+
+        /* Расширяющаяся волна-эхо */
+        .search-center-marker::before {
+            content: '';
+            position: absolute;
+            inset: -6px;
+            border: 2px solid #4ade80;
+            border-radius: 10px;
+            opacity: 0;
+            animation: markerRadarWave 1.8s cubic-bezier(0.25, 1, 0.5, 1) infinite;
+        }
+
+        /* Бегающая линия сканирования */
+        .search-center-marker::after {
+            content: '';
+            position: absolute;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: linear-gradient(90deg, transparent, #86efac, #ffffff, #86efac, transparent);
+            box-shadow: 0 0 8px #4ade80;
+            animation: markerScanLine 1.8s linear infinite;
+        }
+
+        @keyframes markerPulse {
+            0%, 100% {
+                box-shadow: 0 0 6px rgba(34, 197, 94, 0.5), inset 0 0 4px rgba(34, 197, 94, 0.3);
+                border-color: #22c55e;
+            }
+            50% {
+                box-shadow: 0 0 16px rgba(74, 222, 128, 0.9), inset 0 0 8px rgba(74, 222, 128, 0.5);
+                border-color: #4ade80;
+            }
+        }
+
+        @keyframes markerRadarWave {
+            0% {
+                transform: scale(0.85);
+                opacity: 0.9;
+            }
+            70% {
+                transform: scale(1.4);
+                opacity: 0;
+            }
+            100% {
+                transform: scale(1.4);
+                opacity: 0;
+            }
+        }
+
+        @keyframes markerScanLine {
+            0% {
+                top: -10%;
+                opacity: 0;
+            }
+            15% {
+                opacity: 1;
+            }
+            85% {
+                opacity: 1;
+            }
+            100% {
+                top: 110%;
+                opacity: 0;
+            }
+        }
+
         .search-grid {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
@@ -361,11 +437,13 @@
 
         /* Горизонтальная лента загруженных изображений */
         .user-images-scroll {
+            position: relative;
             display: flex;
-            gap: 12px;
             overflow-x: auto;
+            overflow-y: hidden;
             padding-bottom: 8px;
-            scroll-behavior: smooth;
+            height: 158px; /* 150px карточка + 8px запас под скроллбар */
+            -webkit-overflow-scrolling: touch;
         }
         .user-images-scroll::-webkit-scrollbar {
             height: 6px;
@@ -374,8 +452,15 @@
             background-color: #cbd5e1;
             border-radius: 3px;
         }
-        .user-image-card {
+        /* Распорка реального размера скролла */
+        .virtual-scroll-spacer {
             position: relative;
+            height: 100%;
+            flex-shrink: 0;
+        }
+        .user-image-card {
+            position: absolute;
+            top: 0;
             width: 150px;
             height: 150px;
             min-width: 150px;

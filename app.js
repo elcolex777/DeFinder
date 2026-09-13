@@ -26,6 +26,8 @@ function hideSearchPanel() {
     searchPanel.style.display = "none";
     searchGrid.innerHTML = "";
     searchFullPreview.style.display = "none";
+    searchFullPreview.onclick = null;
+    currentFullPreviewUrl = null;
     searchFullImg.removeAttribute("src");
     const oldMarker = searchFullPreview.querySelector(".search-center-marker");
     if (oldMarker) oldMarker.remove();
@@ -196,12 +198,18 @@ function getColorForImagePath(path) {
     return `hsl(${hue}, 75%, 50%)`;
 }
 
+let currentFullPreviewUrl = null;
+
 /**
  * Отображение полного превью с маркером центра
+ * и возможностью клика по картинке для запуска поиска масок
  */
 function showFullPreview(fullImageUrl, center) {
+    currentFullPreviewUrl = fullImageUrl;
     searchFullImg.src = fullImageUrl;
     searchFullPreview.style.display = "flex";
+    searchFullPreview.style.cursor = "pointer";
+    searchFullPreview.title = "Нажмите, чтобы использовать это изображение для поиска масок";
 
     const oldMarker = searchFullPreview.querySelector(".search-center-marker");
     if (oldMarker) oldMarker.remove();
@@ -234,6 +242,12 @@ function showFullPreview(fullImageUrl, center) {
         marker.style.top = `${markerY}px`;
 
         searchFullPreview.appendChild(marker);
+    };
+
+    // Клик по блоку превью выбирает картинку как источник для масок
+    searchFullPreview.onclick = () => {
+        if (!currentFullPreviewUrl) return;
+        handleSelectImageFromUrl(currentFullPreviewUrl);
     };
 
     searchFullPreview.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -977,10 +991,17 @@ async function processQueueWorker() {
 }
 
 // -------------------------------------------------------------
-// БЛОК ЗАГРУЖЕННЫХ ИЗОБРАЖЕНИЙ ПОЛЬЗОВАТЕЛЯ
+// БЛОК ЗАГРУЖЕННЫХ ИЗОБРАЖЕНИЙ ПОЛЬЗОВАТЕЛЯ (ВИРТУАЛИЗАЦИЯ)
 // -------------------------------------------------------------
 
-let userImagesIntersectionObserver = null;
+const USER_CARD_WIDTH = 150;      // ширина из CSS .user-image-card
+const USER_CARD_GAP = 12;         // отступ из CSS .user-images-scroll gap
+const USER_BUFFER_COUNT = 3;      // буфер +-3 элемента по краям
+const USER_SLOT_STEP = USER_CARD_WIDTH + USER_CARD_GAP; // 162 px
+
+let allUserImages = [];
+let userScrollDebounceTimer = null;
+let userVirtualSpacer = null;
 
 async function loadUserImages() {
     if (!currentUserId) return;
@@ -988,9 +1009,6 @@ async function loadUserImages() {
     try {
         const url = `${BASE_URL}/api/v1/masks/images/${currentUserId}`;
         
-        // В описании указано: "Получить список всех изображений отправкой post-запроса на бэкенд",
-        // однако декоратор FastAPI: @app.get("/api/v1/masks/images/{user_id}").
-        // Делаем GET запрос, а в случае 405 (Method Not Allowed) поддерживаем POST.
         let response = await fetch(url, { method: "GET" });
         if (response.status === 405) {
             response = await fetch(url, { method: "POST" });
@@ -1001,64 +1019,97 @@ async function loadUserImages() {
         }
 
         const data = await response.json();
-        const imagesList = data.images || [];
+        allUserImages = data.images || [];
 
-        renderUserImages(imagesList);
+        setupVirtualUserImages();
 
     } catch (error) {
         console.warn("Не удалось загрузить список изображений пользователя:", error);
     }
 }
 
-function renderUserImages(images) {
+/**
+ * Первоначальное построение контейнера-распорки и привязка событий
+ */
+function setupVirtualUserImages() {
     if (!userImagesPanel || !userImagesScroll || !userImagesTitle) return;
 
     userImagesPanel.style.display = "flex";
-    userImagesTitle.textContent = `Загруженные изображения (${images.length})`;
+    userImagesTitle.textContent = `Загруженные изображения (${allUserImages.length})`;
     userImagesScroll.innerHTML = "";
 
-    if (images.length === 0) {
+    if (allUserImages.length === 0) {
         userImagesScroll.innerHTML = `<span style="font-size: 13px; color: #64748b; padding: 10px 0;">Нет загруженных изображений</span>`;
         return;
     }
 
-    if (userImagesIntersectionObserver) {
-        userImagesIntersectionObserver.disconnect();
+    // Полная виртуальная ширина всей полосы прокрутки
+    // (длина всех карточек с отступами, за вычетом отступа после последнего элемента)
+    const totalWidth = allUserImages.length * USER_SLOT_STEP - USER_CARD_GAP;
+
+    userVirtualSpacer = document.createElement("div");
+    userVirtualSpacer.className = "virtual-scroll-spacer";
+    userVirtualSpacer.style.width = `${Math.max(0, totalWidth)}px`;
+    userImagesScroll.appendChild(userVirtualSpacer);
+
+    // Удаляем предыдущий обработчик на случай повторного вызова и ставим новый
+    userImagesScroll.removeEventListener("scroll", onUserImagesScroll);
+    userImagesScroll.addEventListener("scroll", onUserImagesScroll, { passive: true });
+
+    // Первоначальный рендер видимой части без задержки
+    renderVisibleUserImageRange();
+}
+
+/**
+ * Обработчик прокрутки: ждет паузы в 500 мс после остановки движения в любую сторону
+ */
+function onUserImagesScroll() {
+    if (userScrollDebounceTimer) {
+        clearTimeout(userScrollDebounceTimer);
     }
 
-    // Lazy load observer для динамической подгрузки изображений по скроллу
-    userImagesIntersectionObserver = new IntersectionObserver((entries, observer) => {
-        entries.forEach(entry => {
-            if (entry.isIntersecting) {
-                const img = entry.target;
-                const src = img.getAttribute("data-src");
-                if (src) {
-                    img.src = src;
-                    img.removeAttribute("data-src");
-                }
-                observer.unobserve(img);
-            }
-        });
-    }, {
-        root: userImagesScroll,
-        rootMargin: "0px 150px 0px 0px"
-    });
+    userScrollDebounceTimer = setTimeout(() => {
+        renderVisibleUserImageRange();
+    }, 500);
+}
 
-    images.forEach(item => {
+/**
+ * Оставляет в разметке только изображения в зоне видимости (+- 3 по краям).
+ * Все остальные полностью удаляются из DOM.
+ */
+function renderVisibleUserImageRange() {
+    if (!userVirtualSpacer || allUserImages.length === 0) return;
+
+    const scrollLeft = userImagesScroll.scrollLeft;
+    const clientWidth = userImagesScroll.clientWidth;
+
+    // Определяем индексы видимых карточек
+    const firstVisible = Math.floor(scrollLeft / USER_SLOT_STEP);
+    const lastVisible = Math.floor((scrollLeft + clientWidth) / USER_SLOT_STEP);
+
+    // Добавляем буфер +-3 элемента по краям
+    const startIdx = Math.max(0, firstVisible - USER_BUFFER_COUNT);
+    const endIdx = Math.min(allUserImages.length - 1, lastVisible + USER_BUFFER_COUNT);
+
+    // Полностью очищаем распорку от элементов, вышедших из зоны
+    userVirtualSpacer.innerHTML = "";
+
+    // На лету генерируем разметку только для вычисленного диапазона
+    for (let i = startIdx; i <= endIdx; i++) {
+        const item = allUserImages[i];
         const cleanPath = item.image_path.replace(/^\/+/, '');
         const fullSrc = `${BASE_URL}/api/v1/${cleanPath}`;
 
         const card = document.createElement("div");
         card.className = "user-image-card";
         card.title = `Масок: ${item.masks_count}`;
+        card.style.left = `${i * USER_SLOT_STEP}px`;
 
         const img = document.createElement("img");
         img.className = "user-image-thumb";
-        img.loading = "lazy";
+        img.src = fullSrc;
         img.alt = `Масок: ${item.masks_count}`;
-        img.setAttribute("data-src", fullSrc);
 
-        // Бейдж с количеством масок в правом нижнем углу
         const countBadge = document.createElement("span");
         countBadge.className = "user-image-count-badge";
         countBadge.textContent = `${item.masks_count} ⚲`;
@@ -1066,15 +1117,21 @@ function renderUserImages(images) {
         card.appendChild(img);
         card.appendChild(countBadge);
 
-        // Клик: загружаем изображение как исходное и запускаем поиск масок
+        // Клик выбирает изображение как источник поиска масок
         card.onclick = () => {
             handleSelectImageFromUrl(fullSrc);
         };
 
-        userImagesScroll.appendChild(card);
-        userImagesIntersectionObserver.observe(img);
-    });
+        userVirtualSpacer.appendChild(card);
+    }
 }
+
+// При изменении размеров экрана или ориентации устройства
+window.addEventListener("resize", () => {
+    if (userImagesPanel && userImagesPanel.style.display !== "none") {
+        renderVisibleUserImageRange();
+    }
+});
 
 /**
  * Обработка выбора изображения из ленты загруженных
