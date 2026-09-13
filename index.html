@@ -2,7 +2,11 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+    <!-- Было: -->
+    <!-- <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"> -->
+
+    <!-- Нужно: -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=5.0, user-scalable=yes">
     <title>DeFinder</title>
     <style>
         * {
@@ -115,7 +119,7 @@
         .btn-info:hover:not(:disabled) {
             background-color: #0369a1;
         }
-        .settings-panel, .results-panel, .queue-panel {
+        .settings-panel, .results-panel, .queue-panel, .user-images-panel {
             display: none;
             flex-direction: column;
             gap: 15px;
@@ -124,7 +128,7 @@
             border-radius: 12px;
             border: 1px solid #e2e8f0;
         }
-        .queue-header {
+        .queue-header, .user-images-header {
             font-size: 15px;
             font-weight: 600;
             color: #334155;
@@ -282,8 +286,7 @@
         }
         .search-thumb-crop {
             width: 50px;
-            height: auto;
-            max-height: 50px;
+            height: 50px;
             object-fit: contain;
             border-radius: 6px;
             border: 1px solid #cbd5e1;
@@ -312,15 +315,87 @@
             max-height: 280px;
             object-fit: contain;
         }
+
         .search-center-marker {
             position: absolute;
-            width: 20px;
-            height: 20px;
-            box-sizing: border-box;
-            border: 2px solid #22c55e;
-            pointer-events: none;
+            width: 44px;
+            height: 44px;
             transform: translate(-50%, -50%);
+            border: 2px solid #22c55e;
+            border-radius: 6px;
+            background: rgba(34, 197, 94, 0.15);
+            box-sizing: border-box;
+            pointer-events: none; /* чтобы клик свободно проходил на картинку под ним */
+            overflow: hidden;
+            animation: markerPulse 1.8s ease-in-out infinite;
         }
+
+        /* Расширяющаяся волна-эхо */
+        .search-center-marker::before {
+            content: '';
+            position: absolute;
+            inset: -6px;
+            border: 2px solid #4ade80;
+            border-radius: 10px;
+            opacity: 0;
+            animation: markerRadarWave 1.8s cubic-bezier(0.25, 1, 0.5, 1) infinite;
+        }
+
+        /* Бегающая линия сканирования */
+        .search-center-marker::after {
+            content: '';
+            position: absolute;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: linear-gradient(90deg, transparent, #86efac, #ffffff, #86efac, transparent);
+            box-shadow: 0 0 8px #4ade80;
+            animation: markerScanLine 1.8s linear infinite;
+        }
+
+        @keyframes markerPulse {
+            0%, 100% {
+                box-shadow: 0 0 6px rgba(34, 197, 94, 0.5), inset 0 0 4px rgba(34, 197, 94, 0.3);
+                border-color: #22c55e;
+            }
+            50% {
+                box-shadow: 0 0 16px rgba(74, 222, 128, 0.9), inset 0 0 8px rgba(74, 222, 128, 0.5);
+                border-color: #4ade80;
+            }
+        }
+
+        @keyframes markerRadarWave {
+            0% {
+                transform: scale(0.85);
+                opacity: 0.9;
+            }
+            70% {
+                transform: scale(1.4);
+                opacity: 0;
+            }
+            100% {
+                transform: scale(1.4);
+                opacity: 0;
+            }
+        }
+
+        @keyframes markerScanLine {
+            0% {
+                top: -10%;
+                opacity: 0;
+            }
+            15% {
+                opacity: 1;
+            }
+            85% {
+                opacity: 1;
+            }
+            100% {
+                top: 110%;
+                opacity: 0;
+            }
+        }
+
         .search-grid {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
@@ -358,6 +433,68 @@
             text-shadow: 0 2px 4px rgba(0, 0, 0, 0.9), 0 0 8px rgba(0, 0, 0, 0.6);
             pointer-events: none;
             line-height: 1;
+        }
+
+        /* Горизонтальная лента загруженных изображений */
+        .user-images-scroll {
+            position: relative;
+            display: flex;
+            overflow-x: auto;
+            overflow-y: hidden;
+            padding-bottom: 8px;
+            height: 158px; /* 150px карточка + 8px запас под скроллбар */
+            -webkit-overflow-scrolling: touch;
+        }
+        .user-images-scroll::-webkit-scrollbar {
+            height: 6px;
+        }
+        .user-images-scroll::-webkit-scrollbar-thumb {
+            background-color: #cbd5e1;
+            border-radius: 3px;
+        }
+        /* Распорка реального размера скролла */
+        .virtual-scroll-spacer {
+            position: relative;
+            height: 100%;
+            flex-shrink: 0;
+        }
+        .user-image-card {
+            position: absolute;
+            top: 0;
+            width: 150px;
+            height: 150px;
+            min-width: 150px;
+            min-height: 150px;
+            border-radius: 10px;
+            overflow: hidden;
+            cursor: pointer;
+            border: 2px solid transparent;
+            background-color: #0f172a;
+            transition: transform 0.15s ease, border-color 0.15s ease;
+        }
+        .user-image-card:hover {
+            transform: translateY(-2px);
+            border-color: #2563eb;
+        }
+        .user-image-thumb {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+        .user-image-count-badge {
+            position: absolute;
+            bottom: 6px;
+            right: 6px;
+            background: rgba(15, 23, 42, 0.75);
+            color: #ffffff;
+            font-size: 12px;
+            font-weight: 700;
+            padding: 3px 7px;
+            border-radius: 6px;
+            pointer-events: none;
+            backdrop-filter: blur(4px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
         }
 
         details.settings-panel {
@@ -453,7 +590,7 @@
             <div class="search-grid" id="search-grid"></div>
         </div>
 
-        <!-- Кнопки Сохранить и Загрузить (за результатами поиска) -->
+        <!-- Кнопки Сохранить и Загрузить -->
         <div class="controls">
             <button id="save-btn" class="btn-success" disabled>💾 Сохранить</button>
             <button id="upload-btn" class="btn-info">📁 Загрузить</button>
@@ -466,6 +603,14 @@
                 <span id="queue-counter" style="font-size:13px;color:#64748b;">0 задач</span>
             </div>
             <div class="queue-list" id="queue-list"></div>
+        </div>
+
+        <!-- Блок Загруженные изображения -->
+        <div class="user-images-panel" id="user-images-panel">
+            <div class="user-images-header">
+                <span id="user-images-title">Загруженные изображения (0)</span>
+            </div>
+            <div class="user-images-scroll" id="user-images-scroll"></div>
         </div>
 
         <!-- Настройки перемещены в самый конец страницы -->

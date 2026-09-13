@@ -11,6 +11,11 @@ const searchFullPreview = document.getElementById("search-full-preview");
 const searchFullImg = document.getElementById("search-full-img");
 const searchGrid = document.getElementById("search-grid");
 
+// Элементы блока "Загруженные изображения"
+const userImagesPanel = document.getElementById("user-images-panel");
+const userImagesTitle = document.getElementById("user-images-title");
+const userImagesScroll = document.getElementById("user-images-scroll");
+
 let currentSearchAbortController = null;
 
 function hideSearchPanel() {
@@ -21,15 +26,18 @@ function hideSearchPanel() {
     searchPanel.style.display = "none";
     searchGrid.innerHTML = "";
     searchFullPreview.style.display = "none";
+    searchFullPreview.onclick = null;
+    currentFullPreviewUrl = null;
     searchFullImg.removeAttribute("src");
     const oldMarker = searchFullPreview.querySelector(".search-center-marker");
     if (oldMarker) oldMarker.remove();
 }
 
 /**
- * 1. Получение Bounding Box маски, масштабирование на оригинальное изображение,
- * 2. Ресайз кропа до 200px по большей стороне (с сохранением пропорций),
- * 3. Экспорт кропа в Base64.
+ * 1. Получение Bounding Box маски, масштабирование на оригинальное изображение.
+ * 2. Ресайз кропа до 200px по большей стороне (с сохранением пропорций).
+ * 3. Пиксели внутри маски остаются непрозрачными, вне маски - делаются полупрозрачными (альфа = 30%).
+ * 4. Экспорт в PNG для сохранения прозрачности.
  */
 function getScaledMaskCropBase64(binaryMask, infW, infH) {
     if (!originalImageElement) return null;
@@ -75,13 +83,39 @@ function getScaledMaskCropBase64(binaryMask, infW, infH) {
     cropCanvas.height = finalH;
     const cropCtx = cropCanvas.getContext("2d");
     
+    // Отрисовываем исходное изображение в границах кропа
     cropCtx.drawImage(
         originalImageElement,
         origCropX, origCropY, origCropW, origCropH,
         0, 0, finalW, finalH
     );
+
+    // Применяем маску: вне маски делаем изображение полупрозрачным
+    const imgData = cropCtx.getImageData(0, 0, finalW, finalH);
+    const pixels = imgData.data;
+
+    for (let py = 0; py < finalH; py++) {
+        const origY = origCropY + (py / finalH) * origCropH;
+        const infY = Math.min(Math.floor(origY / scaleY), infH - 1);
+        const rowOffset = infY * infW;
+
+        for (let px = 0; px < finalW; px++) {
+            const origX = origCropX + (px / finalW) * origCropW;
+            const infX = Math.min(Math.floor(origX / scaleX), infW - 1);
+            
+            const isInsideMask = binaryMask[rowOffset + infX] === 1;
+            const pixelIdx = (py * finalW + px) * 4;
+
+            if (!isInsideMask) {
+                // Полупрозрачность для области вне маски (30% от текущей альфы ~ 75)
+                pixels[pixelIdx + 3] = Math.round(pixels[pixelIdx + 3] * 0.003);
+            }
+        }
+    }
+    cropCtx.putImageData(imgData, 0, 0);
     
-    const dataUrl = cropCanvas.toDataURL("image/jpeg", 0.90);
+    // Формат PNG для сохранения прозрачности
+    const dataUrl = cropCanvas.toDataURL("image/png");
     return {
         base64WithoutPrefix: dataUrl.split(",")[1],
         fullDataUrl: dataUrl
@@ -151,7 +185,7 @@ async function sendSearchRequest(cropBase64Data) {
 }
 
 /**
- * Генерация стабильного псевдослучайного цвета на основе строки image_path
+ * Генерация стабильного псевдослучайного цвета на основе image_path
  */
 function getColorForImagePath(path) {
     if (!path) return "#22c55e";
@@ -164,12 +198,18 @@ function getColorForImagePath(path) {
     return `hsl(${hue}, 75%, 50%)`;
 }
 
+let currentFullPreviewUrl = null;
+
 /**
  * Отображение полного превью с маркером центра
+ * и возможностью клика по картинке для запуска поиска масок
  */
 function showFullPreview(fullImageUrl, center) {
+    currentFullPreviewUrl = fullImageUrl;
     searchFullImg.src = fullImageUrl;
     searchFullPreview.style.display = "flex";
+    searchFullPreview.style.cursor = "pointer";
+    searchFullPreview.title = "Нажмите, чтобы использовать это изображение для поиска масок";
 
     const oldMarker = searchFullPreview.querySelector(".search-center-marker");
     if (oldMarker) oldMarker.remove();
@@ -202,6 +242,12 @@ function showFullPreview(fullImageUrl, center) {
         marker.style.top = `${markerY}px`;
 
         searchFullPreview.appendChild(marker);
+    };
+
+    // Клик по блоку превью выбирает картинку как источник для масок
+    searchFullPreview.onclick = () => {
+        if (!currentFullPreviewUrl) return;
+        handleSelectImageFromUrl(currentFullPreviewUrl);
     };
 
     searchFullPreview.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -240,9 +286,6 @@ function renderSearchResults(results) {
     });
 }
 
-/**
- * Приведение score к формату целых процентов (например, 0.85 -> 85%)
- */
 function formatScore(score) {
     if (typeof score !== "number" || isNaN(score)) return "0%";
     const percent = Math.round(score * 100);
@@ -365,9 +408,13 @@ uploadBtn.addEventListener("click", function() {
 });
 
 batchInput.addEventListener("change", handleBatchUpload);
-
 saveBtn.addEventListener("click", enqueueSaveTask);
 
+/**
+ * Обработка клика по холсту:
+ * Поскольку cachedDecodedMasks отсортирован (крупные первыми, мелкие последними),
+ * поиск с конца массива выбирает самый маленький/верхний объект.
+ */
 resultCanvas.addEventListener("click", function(event) {
     if (!lastPredictedMasks || cachedDecodedMasks.length === 0 || !lastInferenceW || !lastInferenceH) {
         return;
@@ -390,6 +437,7 @@ resultCanvas.addEventListener("click", function(event) {
     const pixelPos = infY * lastInferenceW + infX;
     let clickedMaskIndex = -1;
     
+    // Ищем с конца массива — там находятся самые маленькие маски на переднем плане
     for (let i = cachedDecodedMasks.length - 1; i >= 0; i--) {
         if (cachedDecodedMasks[i].binaryMask[pixelPos] === 1) {
             clickedMaskIndex = i;
@@ -491,6 +539,26 @@ function decodeRLE(rleMask, width, height) {
     return binaryMask;
 }
 
+/**
+ * Вычисляет площадь Bounding Box для декодированной маски
+ */
+function getBBoxArea(binaryMask, width, height) {
+    let minX = width, maxX = -1, minY = height, maxY = -1;
+    for (let y = 0; y < height; y++) {
+        const row = y * width;
+        for (let x = 0; x < width; x++) {
+            if (binaryMask[row + x] === 1) {
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
+            }
+        }
+    }
+    if (maxX < minX || maxY < minY) return 0;
+    return (maxX - minX + 1) * (maxY - minY + 1);
+}
+
 function scaleAndEncodeRleMask(rleMask, infW, infH, origW, origH) {
     const infBinaryMask = decodeRLE(rleMask, infW, infH);
     const scaleX = origW / infW;
@@ -521,6 +589,10 @@ function scaleAndEncodeRleMask(rleMask, infW, infH, origW, origH) {
     return encodedRle;
 }
 
+/**
+ * Отрисовка масок.
+ * Сортируем: большие площади рисуются первыми (фон), маленькие поверх них (передний план).
+ */
 function drawMaskBorders(masksArray, inferenceWidth, inferenceHeight) {
     const ctx = resultCanvas.getContext("2d");
     ctx.clearRect(0, 0, resultCanvas.width, resultCanvas.height);
@@ -530,10 +602,19 @@ function drawMaskBorders(masksArray, inferenceWidth, inferenceHeight) {
     const scaleY = resultCanvas.height / inferenceHeight;
     
     if (cachedDecodedMasks.length !== masksArray.length) {
-        cachedDecodedMasks = masksArray.map((rleMask, idx) => ({
-            binaryMask: decodeRLE(rleMask, inferenceWidth, inferenceHeight),
-            hue: Math.floor((idx * 137.5) % 360)
-        }));
+        cachedDecodedMasks = masksArray.map((rleMask, idx) => {
+            const binaryMask = decodeRLE(rleMask, inferenceWidth, inferenceHeight);
+            const area = getBBoxArea(binaryMask, inferenceWidth, inferenceHeight);
+            return {
+                originalRle: rleMask,
+                binaryMask: binaryMask,
+                bboxArea: area,
+                hue: Math.floor((idx * 137.5) % 360)
+            };
+        });
+
+        // Сортировка по убыванию площади BBox (крупные -> мелкие)
+        cachedDecodedMasks.sort((a, b) => b.bboxArea - a.bboxArea);
     }
     
     cachedDecodedMasks.forEach((item, index) => {
@@ -627,7 +708,6 @@ async function sendMasksRequest() {
             throw new Error("Ответ сервера не содержит массив 'masks'");
         }
         
-        // Берём точные размеры маски, возвращённые бэкендом
         lastInferenceW = responseData.mask_width || originalImageElement.width;
         lastInferenceH = responseData.mask_height || originalImageElement.height;
         
@@ -642,7 +722,6 @@ async function sendMasksRequest() {
         
         drawMaskBorders(responseData.masks, lastInferenceW, lastInferenceH);
         
-        // Автоматический запуск поиска по исходному изображению
         const fullImageData = getOriginalImageCropData();
         if (fullImageData) {
             sendSearchRequest(fullImageData);
@@ -728,7 +807,6 @@ async function handleBatchUpload(event) {
                 continue;
             }
 
-            // Точные размеры маски от сервера
             const infW = responseData.mask_width || img.width;
             const infH = responseData.mask_height || img.height;
 
@@ -891,6 +969,9 @@ async function processQueueWorker() {
         nextTask.message = responseData.message || "Индексация успешно завершена.";
         renderQueueUI();
         
+        // Обновляем список загруженных изображений пользователя
+        loadUserImages();
+        
         setTimeout(() => {
             const index = saveQueue.findIndex(t => t.id === nextTask.id);
             if (index !== -1) {
@@ -908,3 +989,184 @@ async function processQueueWorker() {
         processQueueWorker();
     }
 }
+
+// -------------------------------------------------------------
+// БЛОК ЗАГРУЖЕННЫХ ИЗОБРАЖЕНИЙ ПОЛЬЗОВАТЕЛЯ (ВИРТУАЛИЗАЦИЯ)
+// -------------------------------------------------------------
+
+const USER_CARD_WIDTH = 150;      // ширина из CSS .user-image-card
+const USER_CARD_GAP = 12;         // отступ из CSS .user-images-scroll gap
+const USER_BUFFER_COUNT = 3;      // буфер +-3 элемента по краям
+const USER_SLOT_STEP = USER_CARD_WIDTH + USER_CARD_GAP; // 162 px
+
+let allUserImages = [];
+let userScrollDebounceTimer = null;
+let userVirtualSpacer = null;
+
+async function loadUserImages() {
+    if (!currentUserId) return;
+
+    try {
+        const url = `${BASE_URL}/api/v1/masks/images/${currentUserId}`;
+        
+        let response = await fetch(url, { method: "GET" });
+        if (response.status === 405) {
+            response = await fetch(url, { method: "POST" });
+        }
+
+        if (!response.ok) {
+            throw new Error(`Статус ответа: ${response.status}`);
+        }
+
+        const data = await response.json();
+        allUserImages = data.images || [];
+
+        setupVirtualUserImages();
+
+    } catch (error) {
+        console.warn("Не удалось загрузить список изображений пользователя:", error);
+    }
+}
+
+/**
+ * Первоначальное построение контейнера-распорки и привязка событий
+ */
+function setupVirtualUserImages() {
+    if (!userImagesPanel || !userImagesScroll || !userImagesTitle) return;
+
+    userImagesPanel.style.display = "flex";
+    userImagesTitle.textContent = `Загруженные изображения (${allUserImages.length})`;
+    userImagesScroll.innerHTML = "";
+
+    if (allUserImages.length === 0) {
+        userImagesScroll.innerHTML = `<span style="font-size: 13px; color: #64748b; padding: 10px 0;">Нет загруженных изображений</span>`;
+        return;
+    }
+
+    // Полная виртуальная ширина всей полосы прокрутки
+    // (длина всех карточек с отступами, за вычетом отступа после последнего элемента)
+    const totalWidth = allUserImages.length * USER_SLOT_STEP - USER_CARD_GAP;
+
+    userVirtualSpacer = document.createElement("div");
+    userVirtualSpacer.className = "virtual-scroll-spacer";
+    userVirtualSpacer.style.width = `${Math.max(0, totalWidth)}px`;
+    userImagesScroll.appendChild(userVirtualSpacer);
+
+    // Удаляем предыдущий обработчик на случай повторного вызова и ставим новый
+    userImagesScroll.removeEventListener("scroll", onUserImagesScroll);
+    userImagesScroll.addEventListener("scroll", onUserImagesScroll, { passive: true });
+
+    // Первоначальный рендер видимой части без задержки
+    renderVisibleUserImageRange();
+}
+
+/**
+ * Обработчик прокрутки: ждет паузы в 500 мс после остановки движения в любую сторону
+ */
+function onUserImagesScroll() {
+    if (userScrollDebounceTimer) {
+        clearTimeout(userScrollDebounceTimer);
+    }
+
+    userScrollDebounceTimer = setTimeout(() => {
+        renderVisibleUserImageRange();
+    }, 500);
+}
+
+/**
+ * Оставляет в разметке только изображения в зоне видимости (+- 3 по краям).
+ * Все остальные полностью удаляются из DOM.
+ */
+function renderVisibleUserImageRange() {
+    if (!userVirtualSpacer || allUserImages.length === 0) return;
+
+    const scrollLeft = userImagesScroll.scrollLeft;
+    const clientWidth = userImagesScroll.clientWidth;
+
+    // Определяем индексы видимых карточек
+    const firstVisible = Math.floor(scrollLeft / USER_SLOT_STEP);
+    const lastVisible = Math.floor((scrollLeft + clientWidth) / USER_SLOT_STEP);
+
+    // Добавляем буфер +-3 элемента по краям
+    const startIdx = Math.max(0, firstVisible - USER_BUFFER_COUNT);
+    const endIdx = Math.min(allUserImages.length - 1, lastVisible + USER_BUFFER_COUNT);
+
+    // Полностью очищаем распорку от элементов, вышедших из зоны
+    userVirtualSpacer.innerHTML = "";
+
+    // На лету генерируем разметку только для вычисленного диапазона
+    for (let i = startIdx; i <= endIdx; i++) {
+        const item = allUserImages[i];
+        const cleanPath = item.image_path.replace(/^\/+/, '');
+        const fullSrc = `${BASE_URL}/api/v1/${cleanPath}`;
+
+        const card = document.createElement("div");
+        card.className = "user-image-card";
+        card.title = `Масок: ${item.masks_count}`;
+        card.style.left = `${i * USER_SLOT_STEP}px`;
+
+        const img = document.createElement("img");
+        img.className = "user-image-thumb";
+        img.src = fullSrc;
+        img.alt = `Масок: ${item.masks_count}`;
+
+        const countBadge = document.createElement("span");
+        countBadge.className = "user-image-count-badge";
+        countBadge.textContent = `${item.masks_count} ⚲`;
+
+        card.appendChild(img);
+        card.appendChild(countBadge);
+
+        // Клик выбирает изображение как источник поиска масок
+        card.onclick = () => {
+            handleSelectImageFromUrl(fullSrc);
+        };
+
+        userVirtualSpacer.appendChild(card);
+    }
+}
+
+// При изменении размеров экрана или ориентации устройства
+window.addEventListener("resize", () => {
+    if (userImagesPanel && userImagesPanel.style.display !== "none") {
+        renderVisibleUserImageRange();
+    }
+});
+
+/**
+ * Обработка выбора изображения из ленты загруженных
+ */
+function handleSelectImageFromUrl(imageUrl) {
+    resetState();
+
+    previewZone.style.display = "flex";
+    captureBtn.textContent = "📷 Сделать новый снимок";
+    galleryBtn.textContent = "🖼️ Выбрать другое фото";
+    settingsPanel.style.display = "block";
+    resultsPanel.style.display = "flex";
+
+    originalImageElement = new Image();
+    originalImageElement.crossOrigin = "anonymous";
+    originalImageElement.onload = function() {
+        resultCanvas.width = originalImageElement.width;
+        resultCanvas.height = originalImageElement.height;
+        const ctx = resultCanvas.getContext("2d");
+        ctx.drawImage(originalImageElement, 0, 0);
+        
+        // Скроллим к рабочей области
+        previewZone.scrollIntoView({ behavior: "smooth", block: "start" });
+
+        // Запускаем предсказание масок
+        sendMasksRequest();
+    };
+    originalImageElement.onerror = function() {
+        errorMessage.textContent = "Не удалось загрузить выбранное изображение";
+        errorMessage.style.display = "block";
+    };
+    originalImageElement.src = imageUrl;
+}
+
+// Первоначальная загрузка списка сохранённых изображений при открытии страницы
+document.addEventListener("DOMContentLoaded", () => {
+    loadUserImages();
+});
