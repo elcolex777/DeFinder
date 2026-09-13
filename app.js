@@ -106,7 +106,7 @@ function getScaledMaskCropBase64(binaryMask, infW, infH) {
 
             if (!isInsideMask) {
                 // Полупрозрачность для области вне маски (30% от текущей альфы ~ 75)
-                pixels[pixelIdx + 3] = Math.round(pixels[pixelIdx + 3] * 0.3);
+                pixels[pixelIdx + 3] = Math.round(pixels[pixelIdx + 3] * 0.003);
             }
         }
     }
@@ -1026,7 +1026,7 @@ function renderUserImages(images) {
         userImagesIntersectionObserver.disconnect();
     }
 
-    // Lazy load observer для динамической загрузки при горизонтальном скролле
+    // Lazy load observer для динамической подгрузки изображений по скроллу
     userImagesIntersectionObserver = new IntersectionObserver((entries, observer) => {
         entries.forEach(entry => {
             if (entry.isIntersecting) {
@@ -1041,24 +1041,72 @@ function renderUserImages(images) {
         });
     }, {
         root: userImagesScroll,
-        rootMargin: "0px 100px 0px 0px"
+        rootMargin: "0px 150px 0px 0px"
     });
 
     images.forEach(item => {
+        const cleanPath = item.image_path.replace(/^\/+/, '');
+        const fullSrc = `${BASE_URL}/api/v1/${cleanPath}`;
+
+        const card = document.createElement("div");
+        card.className = "user-image-card";
+        card.title = `Масок: ${item.masks_count}`;
+
         const img = document.createElement("img");
         img.className = "user-image-thumb";
         img.loading = "lazy";
         img.alt = `Масок: ${item.masks_count}`;
-        img.title = `Масок: ${item.masks_count}`;
-
-        const cleanPath = item.image_path.replace(/^\/+/, '');
-        const fullSrc = `${BASE_URL}/api/v1/${cleanPath}`;
-
         img.setAttribute("data-src", fullSrc);
-        userImagesScroll.appendChild(img);
 
+        // Бейдж с количеством масок в правом нижнем углу
+        const countBadge = document.createElement("span");
+        countBadge.className = "user-image-count-badge";
+        countBadge.textContent = `${item.masks_count} ⚲`;
+
+        card.appendChild(img);
+        card.appendChild(countBadge);
+
+        // Клик: загружаем изображение как исходное и запускаем поиск масок
+        card.onclick = () => {
+            handleSelectImageFromUrl(fullSrc);
+        };
+
+        userImagesScroll.appendChild(card);
         userImagesIntersectionObserver.observe(img);
     });
+}
+
+/**
+ * Обработка выбора изображения из ленты загруженных
+ */
+function handleSelectImageFromUrl(imageUrl) {
+    resetState();
+
+    previewZone.style.display = "flex";
+    captureBtn.textContent = "📷 Сделать новый снимок";
+    galleryBtn.textContent = "🖼️ Выбрать другое фото";
+    settingsPanel.style.display = "block";
+    resultsPanel.style.display = "flex";
+
+    originalImageElement = new Image();
+    originalImageElement.crossOrigin = "anonymous";
+    originalImageElement.onload = function() {
+        resultCanvas.width = originalImageElement.width;
+        resultCanvas.height = originalImageElement.height;
+        const ctx = resultCanvas.getContext("2d");
+        ctx.drawImage(originalImageElement, 0, 0);
+        
+        // Скроллим к рабочей области
+        previewZone.scrollIntoView({ behavior: "smooth", block: "start" });
+
+        // Запускаем предсказание масок
+        sendMasksRequest();
+    };
+    originalImageElement.onerror = function() {
+        errorMessage.textContent = "Не удалось загрузить выбранное изображение";
+        errorMessage.style.display = "block";
+    };
+    originalImageElement.src = imageUrl;
 }
 
 // Первоначальная загрузка списка сохранённых изображений при открытии страницы
